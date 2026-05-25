@@ -1,0 +1,26 @@
+name: admin_activity
+event_type: admin_activity
+cloud_provider: gcp
+severity: high
+description: Response runbook for suspicious GCP Admin Activity audit log events
+steps:
+  - order: 1
+    name: enrich_event
+    description: Enrich the GCP audit log entry with principal, IP, and resource context
+    tool: enrich_gcp_audit_event
+    automated: true
+  - order: 2
+    name: review_iam_changes
+    description: Review recent IAM policy changes in the affected project
+    tool: gcp_iam_review
+    automated: true
+  - order: 3
+    name: validate_change
+    description: Determine whether the admin activity was authorized and expected
+    tool: change_validation
+    automated: false
+  - order: 4
+    name: notify_team
+    description: Notify the cloud security team with enriched context
+    tool: slack_notify
+    automated: true

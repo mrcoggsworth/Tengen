@@ -1,0 +1,26 @@
+name: root_account_usage
+event_type: RootAccountUsage
+cloud_provider: aws
+severity: critical
+description: Response runbook for AWS root account usage — immediate escalation required
+steps:
+  - order: 1
+    name: capture_session_context
+    description: Record all details about the root account session including IP and user-agent
+    tool: enrich_cloudtrail_event
+    automated: true
+  - order: 2
+    name: revoke_active_sessions
+    description: Revoke any active root account sessions and invalidate temporary credentials
+    tool: revoke_aws_sessions
+    automated: false
+  - order: 3
+    name: verify_mfa_status
+    description: Confirm MFA is enforced on the root account
+    tool: check_mfa_status
+    automated: true
+  - order: 4
+    name: page_on_call
+    description: Immediately page the on-call security engineer via PagerDuty
+    tool: pagerduty_trigger
+    automated: true

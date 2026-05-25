@@ -1,0 +1,26 @@
+name: data_access
+event_type: data_access
+cloud_provider: gcp
+severity: medium
+description: Response runbook for anomalous GCP Data Access audit log events
+steps:
+  - order: 1
+    name: enrich_event
+    description: Enrich the GCP audit log entry with caller and resource context
+    tool: enrich_gcp_audit_event
+    automated: true
+  - order: 2
+    name: classify_data
+    description: Determine the classification level of the accessed resource
+    tool: data_classification_lookup
+    automated: true
+  - order: 3
+    name: review_access_pattern
+    description: Analyze historical access patterns for this principal against the resource
+    tool: access_pattern_analysis
+    automated: true
+  - order: 4
+    name: escalate_if_sensitive
+    description: Escalate to HIGH severity and page on-call if sensitive data was accessed
+    tool: severity_escalation
+    automated: false

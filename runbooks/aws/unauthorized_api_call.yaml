@@ -1,0 +1,26 @@
+name: unauthorized_api_call
+event_type: UnauthorizedAPICall
+cloud_provider: aws
+severity: high
+description: Response runbook for unauthorized AWS API call events (AccessDenied / UnauthorizedOperation)
+steps:
+  - order: 1
+    name: identify_caller
+    description: Extract caller identity, source IP, and error details from the CloudTrail event
+    tool: enrich_cloudtrail_event
+    automated: true
+  - order: 2
+    name: check_ip_reputation
+    description: Query threat intelligence for the source IP address
+    tool: ip_reputation_lookup
+    automated: true
+  - order: 3
+    name: review_iam_policy
+    description: Review IAM policies and permission boundaries for the affected principal
+    tool: iam_policy_review
+    automated: false
+  - order: 4
+    name: notify_security_team
+    description: Send enriched alert to the security team Slack channel
+    tool: slack_notify
+    automated: true

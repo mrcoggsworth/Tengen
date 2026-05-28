@@ -1,0 +1,155 @@
+version: "3.9"
+
+services:
+  # ── RabbitMQ (message broker) ──────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: tengen-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Kafka (alternative event backbone) ────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: tengen-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: tengen-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka
+
+  # ── LocalStack (AWS services emulator) ─────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: tengen-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs,s3,iam,cloudtrail,guardduty,ec2
+      AWS_DEFAULT_REGION: us-east-1
+      DEBUG: 0
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ── GCP Pub/Sub emulator ───────────────────────────────────────────────────
+  pubsub-emulator:
+    image: google/cloud-sdk:slim
+    container_name: tengen-pubsub-emulator
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+
+  # ── Tengen Router ──────────────────────────────────────────────────────────
+  router:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: tengen-router
+    command: tengen-router
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      MODEL_NAME: ${MODEL_NAME:-gemini-2.0-flash}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: http://localstack:4566
+    env_file:
+      - ../.env.example
+    restart: unless-stopped
+
+  # ── Tengen Forwarder ──────────────────────────────────────────────────────
+  forwarder:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: tengen-forwarder
+    command: tengen-forwarder
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      SPLUNK_HEC_URL: ${SPLUNK_HEC_URL}
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
+    env_file:
+      - ../.env.example
+    restart: unless-stopped
+
+  # ── Tengen Dashboard ──────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: tengen-dashboard
+    command: tengen-dashboard
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_MGMT_URL: http://rabbitmq:15672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
+      DASHBOARD_HOST: "0.0.0.0"
+      DASHBOARD_PORT: "8080"
+    env_file:
+      - ../.env.example
+    restart: unless-stopped
+
+  # ── Universal HTTP Ingest ─────────────────────────────────────────────────
+  ingest:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: tengen-ingest
+    command: tengen-ingest
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      UNIVERSAL_HTTP_HOST: "0.0.0.0"
+      UNIVERSAL_HTTP_PORT: "8088"
+      UNIVERSAL_HTTP_TOKEN: ${UNIVERSAL_HTTP_TOKEN}
+    env_file:
+      - ../.env.example
+    restart: unless-stopped
+
+volumes:
+  rabbitmq_data:
+  zookeeper_data:
+  kafka_data:
+  localstack_data:

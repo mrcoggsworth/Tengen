@@ -1,0 +1,86 @@
+name: network_ddos_inbound
+description: >
+  Respond to an inbound DDoS attack: volumetric floods, protocol attacks,
+  and application-layer (L7) attacks against cloud-hosted services.
+steps:
+  - id: classify_attack_type
+    description: Determine the DDoS attack vector to select the right mitigation strategy.
+    attack_types:
+      volumetric:
+        - UDP flood
+        - ICMP flood
+        - DNS amplification
+        - NTP amplification
+        signature: high_pps > 100k/s or bandwidth > 1 Gbps
+      protocol:
+        - SYN flood
+        - ACK flood
+        - RST flood
+        signature: high_syn_rate, half-open connections
+      application_layer:
+        - HTTP GET/POST flood
+        - Slowloris
+        - SSL exhaustion
+        signature: high_rps to single endpoint, low bandwidth
+    actions:
+      - Extract: protocol, pps (packets per second), bandwidth_mbps, unique_src_ips
+      - Extract: attack_vector from DDoS event
+      - Classify: based on signature thresholds
+
+  - id: assess_impact
+    description: Determine current service degradation.
+    actions:
+      - Check: target service availability (HTTP health check)
+      - Measure: response latency vs. baseline
+      - Identify: affected services and downstream dependencies
+      - Estimate: number of legitimate users impacted
+
+  - id: analyze_traffic_sources
+    description: Characterize the source IPs to distinguish botnets from amplification.
+    actions:
+      - Extract: top 10 source IPs by packet count
+      - Lookup: ip_reputation and ip_geo for top sources
+      - Check: are sources in same ASN (amplification) or distributed (botnet)
+      - Identify: source countries for geo-blocking candidates
+
+  - id: mitigation_strategy
+    description: Select and apply the appropriate mitigation.
+    mitigation_matrix:
+      volumetric_from_amplification:
+        - Block source ASN at upstream router
+        - Enable cloud DDoS protection (AWS Shield Advanced, Azure DDoS, Cloud Armor)
+      volumetric_botnet:
+        - Rate limit at load balancer
+        - Enable anycast scrubbing center
+        - Geo-block highest-traffic countries if appropriate
+      syn_flood:
+        - Enable SYN cookies at load balancer
+        - Rate limit new connections per source IP
+      application_layer:
+        - Enable WAF rate limiting rules
+        - Enable CAPTCHA for affected endpoints
+        - Block or rate-limit top offending IPs
+    actions:
+      - Apply: cloud provider DDoS protection if not already active
+      - Configure: rate limiting rules on load balancer / WAF
+      - Block: top attacking IPs in security group/NSG/Cloud Armor
+      - If AWS: modify_security_group_deny for top source IPs
+      - If GCP: add_gcp_firewall_deny for top source IPs
+
+  - id: communicate_status
+    description: Notify stakeholders of the attack and mitigation status.
+    actions:
+      - Alert: NOC and security team via PagerDuty
+      - Update: status page if customer-facing service is impacted
+      - Log: attack timeline with peak pps/bandwidth metrics
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: ddos
+      - severity: HIGH or CRITICAL
+      - title: "DDoS Inbound: <attack_type> targeting <dst_ip>"
+      - description
+      - enrichment: {attack_type, peak_pps, bandwidth_mbps, unique_src_ips, top_sources, target}
+      - remediation_steps

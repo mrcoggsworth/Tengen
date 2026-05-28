@@ -1,0 +1,68 @@
+name: k8s_anomalous_exec
+description: >
+  Investigate anomalous kubectl exec or attach operations in Kubernetes.
+  Exec into production pods can enable interactive intrusion, data theft,
+  or lateral movement within the cluster.
+steps:
+  - id: identify_exec_context
+    description: Extract full context of the exec/attach operation.
+    actions:
+      - Extract: user/service-account, namespace, pod name, container name
+      - Extract: source IP address, user-agent
+      - Extract: command(s) executed (from audit log params)
+      - Check: is this a production namespace
+
+  - id: verify_authorization
+    description: >
+      Determine if the exec was authorized. Most production clusters should
+      have RBAC policies preventing exec into non-debug pods.
+    actions:
+      - Check: user has expected exec RBAC role (debug-access or similar)
+      - Check: timestamp — is this during business hours or on-call window
+      - Check: if part of a known CI/CD pipeline (check user-agent)
+      - Verify: was a change ticket opened for this maintenance activity
+
+  - id: analyze_commands
+    description: >
+      Parse the commands executed for malicious intent.
+    suspicious_commands:
+      - curl / wget to external IPs
+      - cat /etc/passwd, /etc/shadow, /proc/*/environ
+      - env (environment variable enumeration)
+      - mount (filesystem inspection)
+      - iptables, netstat, ss (network reconnaissance)
+      - base64 encode/decode (data staging)
+      - chmod +x, install, pip, apt (tool installation)
+    actions:
+      - Parse: command parameters from audit log
+      - Check: each command against suspicious_commands list
+      - Check: for outbound network connections during exec window
+
+  - id: assess_pod_access_level
+    description: >
+      Determine what the exec'd container can access.
+    actions:
+      - Check: container security context (privileged, runAsUser, capabilities)
+      - Check: mounted volumes (especially secrets or host paths)
+      - Check: service account token mounted (default in most clusters)
+      - Check: pod service account RBAC permissions
+
+  - id: containment
+    description: Terminate the exec session and optionally isolate the pod.
+    actions:
+      - Alert: on-call engineer immediately for interactive exec in production
+      - If suspicious commands detected: delete_k8s_pod(namespace, pod_name)
+      - If SA token exposed: delete_k8s_service_account_token(namespace, token_secret)
+      - create_network_policy_deny(namespace, {app: <pod_label>})
+      - Capture: pod forensics before deletion (logs, /proc, /var snapshots)
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: k8s
+      - severity: HIGH or CRITICAL
+      - title: "Anomalous Exec: <user> exec into <pod_name>/<container>"
+      - description
+      - enrichment: {user, namespace, pod, container, src_ip, commands, security_context}
+      - remediation_steps

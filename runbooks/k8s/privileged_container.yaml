@@ -1,0 +1,67 @@
+name: k8s_privileged_container
+description: >
+  Investigate and contain privileged container creation in Kubernetes.
+  Privileged containers have full host access and can escape to the node.
+steps:
+  - id: extract_container_context
+    description: Gather details about the privileged container and its creator.
+    actions:
+      - Extract: pod name, namespace, container name
+      - Extract: user/service-account that created the pod
+      - Extract: source IP of the kubectl request
+      - Extract: image name and tag
+      - Extract: securityContext fields (privileged, runAsUser, capabilities.add)
+      - Extract: hostPID, hostNetwork, hostIPC flags
+
+  - id: validate_authorization
+    description: >
+      Check whether this pod creation was authorized.
+      Privileged pods should only exist in kube-system or monitoring namespaces
+      from known system service accounts.
+    authorized_namespaces:
+      - kube-system
+      - monitoring
+      - security-tools
+    actions:
+      - Check: namespace is in authorized_namespaces
+      - Check: service account is in known_privileged_service_accounts list
+      - Check: pod labels include expected runbook or compliance markers
+      - Query: recent pod creations in same namespace, last 1h
+
+  - id: assess_host_exposure
+    description: Determine the risk of host breakout.
+    high_risk_signals:
+      - privileged: true AND hostPID: true (can ptrace host processes)
+      - hostNetwork: true (can sniff all node traffic)
+      - capabilities: [SYS_ADMIN, NET_ADMIN, SYS_PTRACE]
+      - runAsUser: 0 (root)
+      - volumeMounts: [/proc, /sys, /var/run/docker.sock, /run/containerd]
+    actions:
+      - Check: securityContext for each high_risk_signal
+      - Assess: cumulative risk level
+
+  - id: check_image_provenance
+    description: Verify the container image is from an approved registry.
+    actions:
+      - Check: image against approved_registries list
+      - If image is public: lookup_file_hash for known malicious images
+      - Check: image pull policy (Always vs. IfNotPresent)
+
+  - id: containment
+    description: Delete the unauthorized privileged pod and restrict future creation.
+    actions:
+      - delete_k8s_pod(namespace, pod_name)
+      - create_network_policy_deny(namespace, {app: <pod_label>})
+      - If node compromised: cordon_k8s_node(node_name)
+      - Apply: OPA/Gatekeeper policy to block future privileged pods
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: k8s
+      - severity: HIGH or CRITICAL
+      - title: "Privileged Container Created: <pod_name> in <namespace>"
+      - description
+      - enrichment: {pod, namespace, image, user, src_ip, security_context}
+      - remediation_steps

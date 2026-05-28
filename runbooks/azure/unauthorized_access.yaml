@@ -1,0 +1,69 @@
+name: azure_unauthorized_access
+description: >
+  Investigate and respond to unauthorized access detected in Azure Activity Logs.
+  Covers failed logins, unexpected role assignments, and anomalous API calls.
+steps:
+  - id: gather_context
+    description: >
+      Extract the caller identity, source IP, subscription, resource group,
+      and operation name from the Activity Log event.
+    actions:
+      - Extract: caller, tenantId, subscriptionId, resourceId, operationName, correlationId
+      - Extract: sourceIPAddress from httpRequest or claims
+
+  - id: correlate_recent_activity
+    description: >
+      Query Azure Activity Logs for the same caller over the past 24 hours.
+      Look for patterns: repeated failures, unusual operation sequences,
+      operations from new IPs, or access outside business hours.
+    actions:
+      - Query: Azure Activity Logs, filter caller == <caller>, last 24h
+      - Analyze: frequency of FAILED status events
+      - Analyze: unique source IPs used
+
+  - id: assess_resource_sensitivity
+    description: >
+      Classify the targeted resource. Key management plane resources
+      (KeyVault, AAD, subscriptions, role assignments) require escalation.
+    actions:
+      - Check: resourceProvider against high-value list
+        high_value: [Microsoft.KeyVault, Microsoft.Authorization, Microsoft.AAD,
+                     Microsoft.Compute/virtualMachines, Microsoft.Storage]
+      - Check: operationName for write/delete verbs
+
+  - id: check_conditional_access
+    description: >
+      Verify whether the sign-in complied with Conditional Access policies.
+      Non-compliant sign-ins may indicate policy bypass attempts.
+    actions:
+      - Check: claims.conditionalAccessStatus in event properties
+      - Check: authenticationRequirement field
+
+  - id: determine_severity
+    description: >
+      Set severity based on resource sensitivity, failure count, and IP reputation.
+    severity_matrix:
+      CRITICAL: high-value resource + FAILED + unknown IP
+      HIGH: write/delete on sensitive resource + authenticated
+      MEDIUM: read on sensitive resource or multiple failures
+      LOW: single read failure on non-sensitive resource
+
+  - id: containment
+    description: >
+      For HIGH/CRITICAL: disable the Azure AD account and revoke refresh tokens.
+      For MEDIUM: flag for analyst review.
+    actions:
+      - If severity in [CRITICAL, HIGH]: disable_azure_ad_user(user_id)
+      - If severity in [CRITICAL, HIGH]: revoke_azure_refresh_tokens(user_id)
+      - Notify: security team via PagerDuty
+
+  - id: produce_finding
+    description: Produce the Finding JSON for forwarding.
+    output_fields:
+      - finding_id
+      - source: azure
+      - severity
+      - title: "Unauthorized Azure Access: <operationName>"
+      - description
+      - enrichment: {caller, src_ip, resource, subscription, correlation_id}
+      - remediation_steps

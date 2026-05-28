@@ -1,0 +1,70 @@
+name: azure_privilege_escalation
+description: >
+  Detect and respond to Azure privilege escalation events including role assignment
+  changes, service principal credential updates, and directory role membership changes.
+steps:
+  - id: identify_escalation_operation
+    description: >
+      Confirm that the operation is a known privilege escalation vector.
+    escalation_operations:
+      - Microsoft.Authorization/roleAssignments/write
+      - Microsoft.Authorization/roleDefinitions/write
+      - Microsoft.Authorization/policyAssignments/write
+      - Microsoft.AAD/directoryRoleMembers/write
+      - Microsoft.Directory/servicePrincipals/credentials/update
+      - Microsoft.ManagedIdentity/userAssignedIdentities/assign/action
+    actions:
+      - Extract: operationName, caller, targetResourceId, correlationId
+
+  - id: determine_scope
+    description: >
+      Identify the scope of the role assignment (subscription, resource group, resource)
+      and the role being assigned. Owner and User Access Administrator are critical.
+    critical_roles:
+      - Owner
+      - User Access Administrator
+      - Contributor (to subscription scope)
+      - Global Administrator
+      - Privileged Role Administrator
+    actions:
+      - Extract: requestBody.properties.roleDefinitionId
+      - Extract: requestBody.properties.principalId
+      - Lookup: role definition name from ARM API
+      - Check: assignment scope (subscription-wide = higher risk)
+
+  - id: verify_authorized_change
+    description: >
+      Cross-reference against the change management system or known-good
+      service accounts. Unplanned changes during off-hours are high risk.
+    actions:
+      - Check: is caller in known_good_identities list
+      - Check: event timestamp against business hours
+      - Query: CMDB or ServiceNow for open change ticket
+
+  - id: correlate_with_signin
+    description: >
+      Look up recent sign-in logs for the caller to detect compromised credentials
+      or token theft behind the escalation.
+    actions:
+      - Query: Azure AD sign-in logs for <caller>, last 2h
+      - Check: MFA status, Conditional Access compliance
+      - Check: sign-in location vs. previous baseline
+
+  - id: containment
+    description: Immediately contain confirmed privilege escalations.
+    actions:
+      - Revoke: the unauthorized role assignment (ARM DELETE roleAssignment)
+      - If account compromised: disable_azure_ad_user(user_id)
+      - If account compromised: revoke_azure_refresh_tokens(user_id)
+      - Alert: CISO and cloud security team
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: azure
+      - severity: CRITICAL
+      - title: "Azure Privilege Escalation: <operationName> by <caller>"
+      - description
+      - enrichment: {caller, role_assigned, scope, src_ip, correlation_id, mfa_status}
+      - remediation_steps

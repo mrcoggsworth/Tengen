@@ -1,0 +1,64 @@
+name: network_firewall_block_surge
+description: >
+  Investigate a surge in firewall DENY/DROP/BLOCK events from one or more source IPs.
+  Surges can indicate port scanning, brute-force attacks, or DDoS probing.
+steps:
+  - id: characterize_surge
+    description: Extract and classify the blocking event pattern.
+    actions:
+      - Extract: src_ip, dst_ip, dst_port, protocol, bytes, packets
+      - Count: events per minute from same src_ip
+      - Identify: is this single-IP or multi-IP (distributed scan/DDoS)
+      - Classify: port_scan (sequential ports), service_brute_force (single port),
+                  or volumetric (high pps, many ports)
+
+  - id: enrich_source_ip
+    description: Build a threat profile for each attacking IP.
+    actions:
+      - Lookup: ip_reputation(src_ip) → abuse score, known threat actor
+      - Lookup: ip_geo(src_ip) → country, ASN, ISP
+      - Check: is_tor, is_vpn, is_datacenter
+      - Query: historical firewall blocks for this IP, last 30d
+
+  - id: assess_target_exposure
+    description: Determine what the attacker is probing and the impact risk.
+    high_value_ports:
+      - 22: SSH
+      - 3389: RDP
+      - 443: HTTPS (web app)
+      - 8443: HTTPS alt
+      - 5432: PostgreSQL
+      - 3306: MySQL
+      - 6379: Redis
+      - 27017: MongoDB
+    actions:
+      - Check: dst_port against high_value_ports
+      - Identify: if any blocks are for allowed services (misconfiguration detection)
+      - Check: dst_ip against critical asset inventory
+
+  - id: correlate_with_application_logs
+    description: >
+      Check whether any probe attempts succeeded before being blocked.
+    actions:
+      - Query: application access logs for src_ip, last 24h
+      - Query: CloudTrail/Azure for API calls from src_ip
+      - Query: CrowdStrike for detections involving src_ip
+
+  - id: containment
+    description: Block the attacking IP at the network perimeter.
+    actions:
+      - If AWS: modify_security_group_deny(group_id, src_ip)
+      - If GCP: add_gcp_firewall_deny(project_id, src_ip)
+      - Add: IP to WAF block list if applicable
+      - If distributed (> 10 unique IPs): escalate to DDoS mitigation
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: firewall
+      - severity
+      - title: "Firewall Block Surge from <src_ip>"
+      - description
+      - enrichment: {src_ip, dst_ports, abuse_score, geo, event_rate_per_min, is_tor}
+      - remediation_steps

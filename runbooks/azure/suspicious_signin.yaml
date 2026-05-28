@@ -1,0 +1,68 @@
+name: azure_suspicious_signin
+description: >
+  Investigate suspicious Azure AD sign-ins including impossible travel,
+  sign-ins from anonymous proxies, and credential spray patterns.
+steps:
+  - id: classify_signin_risk
+    description: Extract sign-in risk signals from the Azure AD sign-in log entry.
+    risk_signals:
+      - riskLevelDuringSignIn: medium, high
+      - riskEventTypes: anonymizedIPAddress, unfamiliarFeatures, malwareLinkedIPAddress,
+                        impossibleTravel, leakedCredentials, investigationsThreatIntelligence
+      - conditionalAccessStatus: failure
+      - isInteractive: false (non-interactive = harder to detect)
+    actions:
+      - Extract: userPrincipalName, ipAddress, location, deviceDetail
+      - Extract: riskLevelDuringSignIn, riskEventTypes, conditionalAccessStatus
+
+  - id: check_impossible_travel
+    description: >
+      Compare the sign-in location against the user's previous sign-in.
+      Calculate approximate travel time required and flag if impossible.
+    actions:
+      - Query: previous sign-in for same UPN
+      - Compare: geo coordinates of current vs. previous location
+      - Calculate: time delta and distance
+      - Flag: if distance/time implies > 900 km/h travel
+
+  - id: check_spray_pattern
+    description: >
+      Detect credential spraying: many users targeted from one IP,
+      or one user targeted from many IPs in a short window.
+    actions:
+      - Query: Azure sign-in logs for same IP, last 1h, count distinct UPNs
+      - Query: Azure sign-in logs for same UPN, last 1h, count distinct IPs
+      - Flag: if unique_users_per_ip > 10 or unique_ips_per_user > 5
+
+  - id: check_mfa_bypass
+    description: >
+      Determine whether MFA was bypassed or not enforced.
+    actions:
+      - Check: authenticationRequirement == "singleFactorAuthentication"
+      - Check: mfaDetail fields
+      - Check: isMfaRegistered for the user
+
+  - id: enrich_ip
+    description: Enrich the source IP for threat context.
+    actions:
+      - Lookup: ip_reputation(ipAddress) via AbuseIPDB
+      - Lookup: ip_geo(ipAddress)
+      - Check: is_tor, is_vpn, is_datacenter flags
+
+  - id: containment
+    description: Contain confirmed compromised sign-ins.
+    actions:
+      - If riskLevel == high or impossible_travel: revoke_azure_refresh_tokens(user_id)
+      - If credential_spray confirmed: block IP via NSG rule
+      - If account confirmed compromised: disable_azure_ad_user(user_id)
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: azure
+      - severity
+      - title: "Suspicious Azure Sign-in: <riskEventType> for <userPrincipalName>"
+      - description
+      - enrichment: {upn, src_ip, location, risk_level, risk_events, mfa_status, geo}
+      - remediation_steps

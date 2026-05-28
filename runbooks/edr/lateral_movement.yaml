@@ -1,0 +1,63 @@
+name: edr_lateral_movement
+description: >
+  Investigate and contain CrowdStrike detections indicating lateral movement:
+  pass-the-hash, WMI execution, PsExec, SMB traversal, and RDP abuse.
+steps:
+  - id: identify_lateral_technique
+    description: >
+      Classify the lateral movement technique using MITRE ATT&CK mapping.
+    techniques:
+      T1021.001: Remote Desktop Protocol (RDP)
+      T1021.002: SMB/Windows Admin Shares
+      T1047: WMI
+      T1550.002: Pass the Hash
+      T1550.003: Pass the Ticket
+      T1570: Lateral Tool Transfer
+    actions:
+      - Extract: technique ID from behaviors
+      - Extract: source and destination hostnames
+      - Extract: credentials used (account name, NTLM hash)
+
+  - id: map_movement_path
+    description: >
+      Reconstruct the attacker's movement path across the network.
+    actions:
+      - Query: CrowdStrike for same actor on other devices, last 4h
+      - Query: CloudTrail or Azure Activity for same credentials in cloud, last 4h
+      - Build: movement graph (source → destination hops)
+
+  - id: check_credential_validity
+    description: >
+      Determine if the credentials used are still valid and where else they have access.
+    actions:
+      - Lookup: user_context(account_name) → group membership, last login
+      - Query: IAM for active access keys or sessions
+      - Check: Kerberos ticket validity (if Pass-the-Ticket)
+
+  - id: scope_blast_radius
+    description: >
+      Enumerate all systems the attacker has touched and assess data access.
+    actions:
+      - List: all devices with detections from same actor, last 24h
+      - List: cloud resources accessed by compromised credentials
+      - Check: any data stores (S3, SQL, SharePoint) accessed
+
+  - id: containment
+    description: Sever the attacker's movement capability.
+    actions:
+      - Disable: compromised AWS IAM credentials (disable_iam_access_key)
+      - Disable: compromised Azure AD account (disable_azure_ad_user)
+      - Revoke: active sessions (revoke_sts_sessions, revoke_azure_refresh_tokens)
+      - Isolate: affected hosts via CrowdStrike network containment
+      - Block: source IP via firewall/NSG if external
+
+  - id: produce_finding
+    description: Produce the Finding JSON.
+    output_fields:
+      - finding_id
+      - source: crowdstrike
+      - severity: CRITICAL
+      - title: "Lateral Movement: <technique> from <src_host> to <dst_host>"
+      - description
+      - enrichment: {src_host, dst_host, technique, credentials_used, movement_path, blast_radius}
+      - remediation_steps

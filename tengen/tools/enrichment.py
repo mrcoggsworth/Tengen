@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # ── Legacy field-extraction enrichers ──────────────────────────────────────
 
 def enrich_cloudtrail_alert(alert: Any) -> dict:
-    event = alert.raw_event if hasattr(alert, "raw_event") else {}
+    event = getattr(alert, "raw_payload", None) or getattr(alert, "raw_event", {})
     return {
         "user_agent": event.get("userAgent", ""),
         "source_ip": event.get("sourceIPAddress", ""),
@@ -25,7 +25,8 @@ def enrich_cloudtrail_alert(alert: Any) -> dict:
 
 
 def enrich_gcp_audit_alert(alert: Any) -> dict:
-    payload = (alert.raw_event if hasattr(alert, "raw_event") else {}).get("protoPayload", {})
+    raw = getattr(alert, "raw_payload", None) or getattr(alert, "raw_event", {})
+    payload = raw.get("protoPayload", {})
     return {
         "caller_ip": payload.get("requestMetadata", {}).get("callerIp", ""),
         "caller_user_agent": payload.get("requestMetadata", {}).get("callerSuppliedUserAgent", ""),

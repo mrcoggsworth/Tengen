@@ -11,3 +11,23 @@ from .normalized_event import (
     TargetContext,
 )
 from .runbook import Runbook, RunbookStep
+from .udm import (
+    CloudContext,
+    File,
+    Location,
+    Metadata,
+    Network,
+    NetworkDirection,
+    NetworkHttp,
+    Noun,
+    Platform,
+    Process,
+    RegistryEntry,
+    Resource,
+    SecurityResult,
+    UDMEvent,
+    UDMEventType,
+    UDMSecurityAction,
+    UDMSeverity,
+    User,
+)

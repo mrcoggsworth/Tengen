@@ -9,7 +9,7 @@ def parse_cloudtrail_event(raw_event: dict) -> Alert:
         source=CloudProvider.AWS,
         severity=_infer_aws_severity(raw_event),
         event_type=raw_event.get("eventName", "Unknown"),
-        raw_event=raw_event,
+        raw_payload=raw_event,
         timestamp=raw_event.get("eventTime", ""),
         account_id=raw_event.get("userIdentity", {}).get("accountId", ""),
         region=raw_event.get("awsRegion", ""),
@@ -22,7 +22,7 @@ def parse_gcp_audit_event(raw_event: dict) -> Alert:
         source=CloudProvider.GCP,
         severity=_infer_gcp_severity(raw_event),
         event_type=raw_event.get("protoPayload", {}).get("methodName", "Unknown"),
-        raw_event=raw_event,
+        raw_payload=raw_event,
         timestamp=raw_event.get("timestamp", ""),
         project_id=raw_event.get("resource", {}).get("labels", {}).get("project_id", ""),
     )

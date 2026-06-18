@@ -253,6 +253,7 @@ Tengen/
 │   ├── router_main.py                  # Entry point: start the routing pipeline
 │   ├── forwarder_main.py               # Entry point: start enriched + DLQ forwarders
 │   ├── dashboard_main.py               # Entry point: start the FastAPI dashboard
+│   ├── udm_main.py                     # Entry point: tengen-udm CLI (parse/fields/branch)
 │   │
 │   ├── agents/                         # All LlmAgent definitions
 │   │   ├── orchestrator.py             # Top-level 6-step pipeline coordinator
@@ -285,11 +286,19 @@ Tengen/
 │   ├── models/                         # Pydantic v2 frozen data models
 │   │   ├── alert.py                    # Alert, AlertSeverity, CloudProvider
 │   │   ├── normalized_event.py         # NormalizedEvent, LogSourceType, ActorContext,
-│   │   │                               #   TargetContext, NetworkContext, Outcome
+│   │   │                               #   TargetContext, NetworkContext, Outcome, to_udm()
+│   │   ├── udm.py                      # UDMEvent + Metadata/Noun/User/Process/File/
+│   │   │                               #   Network/SecurityResult + UDM enums
 │   │   ├── incident.py                 # Incident, IncidentStatus
 │   │   ├── finding.py                  # Finding, RemediationStep
 │   │   ├── enriched_alert.py           # EnrichedAlert (runbook output)
 │   │   └── runbook.py                  # Runbook, RunbookStep
+│   │
+│   ├── udm/                            # UDM parsing + field-discovery layer
+│   │   ├── parser.py                   # UDMParser: raw → UDMEvent + unmapped fields
+│   │   ├── mappings.py                 # CONSUMED_PATHS + UDM-field suggestion heuristics
+│   │   ├── field_registry.py           # FieldRegistry (separate low-resource SQLite DB)
+│   │   └── model_updater.py            # Approved fields → proposal scaffold + branch
 │   │
 │   ├── routing/                        # Deterministic event routing
 │   │   ├── registry.py                 # RouteRegistry + Route + MatcherFn
@@ -437,6 +446,12 @@ The universal event schema produced by normalizers. All downstream components wo
 | `raw_event` | `dict` | Original raw event (preserved for runbook access) |
 | `tags` | `list[str]` | Classification tags (tactic, technique, provider) |
 | `labels` | `dict[str, str]` | Key-value metadata for filtering |
+| `vendor_name` | `str` | UDM-aligned vendor (optional; defaulted in `to_udm()`) |
+| `product_name` | `str` | UDM-aligned product (optional; defaulted in `to_udm()`) |
+| `udm_event_type` | `UDMEventType \| None` | Explicit UDM event classification (optional) |
+
+`NormalizedEvent.to_udm()` projects this event onto a `UDMEvent` (see
+[Unified Data Model](#unified-data-model-udm--field-discovery)).
 
 **Sub-models:**
 
@@ -566,6 +581,84 @@ privileged_actor_bonus: recurrence_factor × 1.5
 
 Example: A single CRITICAL CrowdStrike event from a privileged account:
 `10.0 × 1.5 × 1.0 × 1.5 = 22.5`
+
+---
+
+## Unified Data Model (UDM) & Field Discovery
+
+Tengen parses every incoming alert into a single vendor-neutral schema modeled
+on [Google Chronicle's Unified Data Model](https://cloud.google.com/chronicle/docs/event-processing/udm-overview),
+so disparate terms (`sourceIPAddress`, `callerIp`, `clientIpAddress`, `LocalIP`)
+all collapse onto the same UDM field (`principal.ip` / `src.ip`).
+
+### `UDMEvent` (`tengen/models/udm.py`)
+The canonical schema. A high-value subset of UDM with an `additional` escape
+hatch that preserves anything not yet promoted to a first-class field.
+
+| Section | Type | Maps from |
+|---|---|---|
+| `metadata` | `Metadata` | `event_timestamp`, `event_type` (UDM enum), `product_event_type`, `vendor_name`, `product_name`, `log_type` |
+| `principal` | `Noun` | The actor (Tengen `ActorContext`) + source IP/port |
+| `src` | `Noun` | Network-level source |
+| `target` | `Noun` | Resource acted upon (Tengen `TargetContext`) + destination IP/port |
+| `intermediary` / `observer` / `about` | `Noun` | Proxies, passive monitors, referenced entities |
+| `network` | `Network` | Protocol, bytes, HTTP sub-record |
+| `security_result` | `list[SecurityResult]` | Severity, action, rule/threat classification |
+| `additional` | `dict` | Unmapped raw fields (preserved, never dropped) |
+
+A **`Noun`** is the reused entity shape (`hostname`, `ip`, `port`, `mac`,
+`user`, `process`, `file`, `registry`, `resource`, `cloud`, `location`,
+`namespace`, `labels`, …). `NormalizedEvent` is UDM-aligned and exposes
+`to_udm()` to project itself onto a `UDMEvent` — existing fields that already
+fit UDM (`actor`→`principal`, `target`→`target`, `network`→`network`,
+`outcome`/`severity`→`security_result`) are preserved.
+
+### Parser (`tengen/udm/parser.py`)
+`UDMParser.parse(raw)` runs the matching source normalizer, projects the result
+to a `UDMEvent`, then walks the raw payload to find any leaf field the model
+does not yet cover. Each unmapped field is preserved under
+`additional.unmapped` and recorded in the **field registry** with a heuristic
+suggestion (`tengen/udm/mappings.py`) for the UDM field it should map onto.
+
+### Field registry (`tengen/udm/field_registry.py`)
+A deliberately **low-resource, separate SQLite database** (one file, no server;
+set via `TENGEN_UDM_REGISTRY_DB`, default `/tmp/tengen_udm_fields.db`) — kept
+apart from the metrics DB. Each row is a discovered field candidate
+(`source_type`, `raw_path`, `suggested_udm_field`, `value_type`,
+`sample_value`, `occurrence_count`, `status`, `first_seen`/`last_seen`). Repeats
+upsert and bump the counter. Status lifecycle: `new → approved → promoted`, or
+`ignored`.
+
+### Dashboard ("UDM Field Discovery")
+The registry is surfaced in the front-end monitoring dashboard
+(`tengen/dashboard`):
+
+- `GET /api/udm/fields[?status=&source_type=]` — list candidates
+- `GET /api/udm/fields/summary` — counts by status/source
+- `PATCH /api/udm/fields/{id}` — review action (`approved` / `ignored` / re-map)
+
+The dashboard renders a table with **Approve / Ignore** buttons, and the
+overview adds a `UDM New Fields` stat card.
+
+### Model updates via branch + PR (`tengen/udm/model_updater.py`)
+Once an analyst approves fields, `propose_from_registry()` turns approved rows
+into `FieldProposal`s (target model + field name + type, flagging new vs
+already-existing). `create_update_branch()` writes a reviewable scaffold module
+(`tengen/models/udm_proposed_fields.py`, `*Additions` classes), creates a new
+branch, and commits it — **it never opens a PR automatically and never mutates
+the live model**; a human folds the fields into `udm.py` and opens the PR after
+review.
+
+### `tengen-udm` CLI (`tengen/udm_main.py`)
+```bash
+cat alert.json | tengen-udm parse          # parse → UDM, record new fields
+tengen-udm fields --status new             # list discovered candidates
+tengen-udm summary                         # registry counts
+tengen-udm approve 12                       # review actions
+tengen-udm ignore 7
+tengen-udm propose                          # preview proposal table + scaffold
+tengen-udm branch                           # branch + commit scaffold (no PR)
+```
 
 ---
 

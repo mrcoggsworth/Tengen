@@ -10,7 +10,7 @@ def test_alert_model_validation():
         source=CloudProvider.AWS,
         severity=AlertSeverity.HIGH,
         event_type="AssumeRole",
-        raw_event={"eventName": "AssumeRole"},
+        raw_payload={"eventName": "AssumeRole"},
         timestamp="2024-01-15T10:30:00Z",
         account_id="123456789012",
         region="us-east-1",

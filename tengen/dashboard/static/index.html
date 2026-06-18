@@ -31,6 +31,9 @@
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
   .empty { padding: 24px; text-align: center; color: #8b949e; font-size: 0.85rem; }
+  button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; font-size: 0.75rem; cursor: pointer; margin-right: 4px; }
+  button:hover { background: #30363d; border-color: #58a6ff; }
+  code { font-size: 0.8rem; color: #79c0ff; }
 </style>
 </head>
 <body>
@@ -73,6 +76,19 @@
       </table>
     </div>
   </div>
+  <div class="section">
+    <div class="section-header">
+      UDM Field Discovery
+      <span class="refresh-note">new raw fields awaiting promotion into the UDM model</span>
+    </div>
+    <table id="udm-fields-table">
+      <thead><tr>
+        <th>Source</th><th>Raw Path</th><th>Suggested UDM Field</th>
+        <th>Type</th><th>Seen</th><th>Status</th><th>Actions</th>
+      </tr></thead>
+      <tbody id="udm-fields-tbody"></tbody>
+    </table>
+  </div>
 </div>
 <script>
 async function fetchJSON(url) {
@@ -89,6 +105,7 @@ function setStatCards(overview) {
     { label: 'DLQ Count', value: overview.dlq_count, cls: overview.dlq_count > 0 ? 'warn' : '' },
     { label: 'Containment Actions', value: overview.containment_actions, cls: '' },
     { label: 'Active Queues', value: overview.queue_count, cls: '' },
+    { label: 'UDM New Fields', value: overview.udm_new_fields, cls: overview.udm_new_fields > 0 ? 'warn' : 'ok' },
   ];
   grid.innerHTML = cards.map(c => `
     <div class="stat-card ${c.cls}">
@@ -142,19 +159,55 @@ function setRunbooksTable(runbooks) {
     </tr>`).join('');
 }
 
+const STATUS_BADGE = { new: 'badge-warn', approved: 'badge-ok', promoted: 'badge-info', ignored: 'badge-info' };
+
+function setUdmFieldsTable(fields) {
+  const tbody = document.getElementById('udm-fields-tbody');
+  if (!fields || !fields.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty">No new fields discovered</td></tr>'; return; }
+  tbody.innerHTML = fields.map(f => {
+    const badge = STATUS_BADGE[f.status] || 'badge-info';
+    const actions = (f.status === 'new')
+      ? `<button onclick="udmSetStatus(${f.id}, 'approved')">Approve</button>
+         <button onclick="udmSetStatus(${f.id}, 'ignored')">Ignore</button>`
+      : (f.status === 'approved'
+          ? `<button onclick="udmSetStatus(${f.id}, 'new')">Unapprove</button>`
+          : '—');
+    return `<tr>
+      <td><code>${f.source_type}</code></td>
+      <td><code>${f.raw_path}</code></td>
+      <td>${f.suggested_udm_field ? '<code>' + f.suggested_udm_field + '</code>' : '<span class="refresh-note">unmapped</span>'}</td>
+      <td>${f.value_type}</td>
+      <td>${f.occurrence_count}</td>
+      <td><span class="${badge}">${f.status}</span></td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function udmSetStatus(id, status) {
+  await fetch('/api/udm/fields/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+  refresh();
+}
+
 async function refresh() {
-  const [overview, queues, metrics, routes, runbooks] = await Promise.all([
+  const [overview, queues, metrics, routes, runbooks, udmFields] = await Promise.all([
     fetchJSON('/api/overview'),
     fetchJSON('/api/queues'),
     fetchJSON('/api/metrics'),
     fetchJSON('/api/routes'),
     fetchJSON('/api/runbooks'),
+    fetchJSON('/api/udm/fields'),
   ]);
   setStatCards(overview);
   setQueueTable(queues);
   setMetricsTable(metrics);
   setRoutesTable(routes);
   setRunbooksTable(runbooks);
+  setUdmFieldsTable(udmFields);
   document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 

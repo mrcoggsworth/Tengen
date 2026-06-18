@@ -21,6 +21,7 @@ dependencies = [
     "google-cloud-logging>=3.10",
     "google-cloud-pubsub>=2.21",
     "google-auth>=2.29",
+    "google-api-python-client>=2.0",
 
     # Azure
     "azure-identity>=1.17",
@@ -67,6 +68,7 @@ tengen-forwarder = "tengen.forwarder_main:main"
 tengen-dashboard = "tengen.dashboard_main:main"
 tengen-ingest = "tengen.consumers.universal_consumer:main"
 tengen-tui = "tengen.tui_main:main"
+tengen-udm = "tengen.udm_main:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

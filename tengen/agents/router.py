@@ -14,10 +14,18 @@ from ..n8n.route_resolver import NoRouteError, RouteResolver
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Lazy singletons – created on first use so tests can set env vars first.
+# Module-level singletons
 # ---------------------------------------------------------------------------
+# Client is safe to create eagerly (no file I/O in __init__).
+_n8n_client = N8nClient(
+    timeout=settings.n8n_timeout,
+    max_retries=settings.n8n_max_retries,
+    backoff_base=settings.n8n_backoff_base,
+)
+
+# Resolver is lazy: its __init__ opens the YAML file, which may not exist
+# until the env var is set (e.g. in tests via monkeypatch).
 _route_resolver: RouteResolver | None = None
-_n8n_client: N8nClient | None = None
 
 
 def _get_resolver() -> RouteResolver:
@@ -25,17 +33,6 @@ def _get_resolver() -> RouteResolver:
     if _route_resolver is None:
         _route_resolver = RouteResolver(settings.n8n_routes_path)
     return _route_resolver
-
-
-def _get_client() -> N8nClient:
-    global _n8n_client
-    if _n8n_client is None:
-        _n8n_client = N8nClient(
-            timeout=settings.n8n_timeout,
-            max_retries=settings.n8n_max_retries,
-            backoff_base=settings.n8n_backoff_base,
-        )
-    return _n8n_client
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +75,7 @@ def _execute_webhook(webhook_url: str, payload_json: str) -> str:
         return json.dumps({"error": "invalid_payload", "details": str(exc)})
 
     try:
-        result = _get_client().execute_sync(webhook_url, payload)
+        result = _n8n_client.execute_sync(webhook_url, payload)
         return json.dumps(result)
     except N8nRequestFailed as exc:
         logger.error("n8n webhook failed: %s", exc)

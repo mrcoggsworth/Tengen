@@ -1,7 +1,7 @@
 """Tests for the rewritten router agent n8n tool wrappers."""
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,9 +33,7 @@ def test_resolve_route_falls_back_to_default():
 def test_execute_webhook_success():
     from tengen.agents.router import _execute_webhook
     mock_response = {"result": "enriched", "severity": "high"}
-    mock_client = MagicMock()
-    mock_client.execute_sync.return_value = mock_response
-    with patch("tengen.agents.router._get_client", return_value=mock_client):
+    with patch("tengen.agents.router._n8n_client.execute_sync", return_value=mock_response):
         result = json.loads(_execute_webhook(
             "https://n8n.example.com/webhook/test",
             json.dumps({"event": "data"}),
@@ -52,9 +50,7 @@ def test_execute_webhook_failure():
         detail="Internal Server Error",
         attempts=3,
     )
-    mock_client = MagicMock()
-    mock_client.execute_sync.side_effect = error
-    with patch("tengen.agents.router._get_client", return_value=mock_client):
+    with patch("tengen.agents.router._n8n_client.execute_sync", side_effect=error):
         result = json.loads(_execute_webhook(
             "https://n8n.example.com/webhook/test",
             json.dumps({"event": "data"}),

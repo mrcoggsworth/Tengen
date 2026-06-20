@@ -97,7 +97,14 @@ class N8nClient:
 
     def execute_sync(self, webhook_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Sync wrapper for use in ADK FunctionTool contexts."""
-        return asyncio.run(self.execute(webhook_url, payload))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.execute(webhook_url, payload))
+        # Already inside an event loop — run in a worker thread
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, self.execute(webhook_url, payload)).result()
 
     async def close(self) -> None:
         await self._client.aclose()

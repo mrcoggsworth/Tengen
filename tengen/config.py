@@ -79,5 +79,11 @@ class Settings:
     # ── Legacy ────────────────────────────────────────────────────────────────
     siem_endpoint: str = field(default_factory=lambda: os.getenv("SIEM_ENDPOINT", ""))
 
+    # ── n8n ──────────────────────────────────────────────────────────────────
+    n8n_routes_path: str = field(default_factory=lambda: os.getenv("N8N_ROUTES_PATH", "/etc/tengen/n8n_routes.yaml"))
+    n8n_timeout: int = field(default_factory=lambda: int(os.getenv("N8N_TIMEOUT", "30")))
+    n8n_max_retries: int = field(default_factory=lambda: int(os.getenv("N8N_MAX_RETRIES", "3")))
+    n8n_backoff_base: int = field(default_factory=lambda: int(os.getenv("N8N_BACKOFF_BASE", "2")))
+
 
 settings = Settings()

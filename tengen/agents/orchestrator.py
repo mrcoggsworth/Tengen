@@ -1,4 +1,4 @@
-"""OrchestratorAgent — top-level pipeline: ingest → normalize → triage → route → contain → enrich → forward."""
+"""OrchestratorAgent — top-level pipeline: ingest → normalize → triage → route (n8n) → forward."""
 from __future__ import annotations
 
 import json
@@ -8,8 +8,6 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 
 from ..config import settings
-from .containment import containment_agent
-from .enrichment_agent import enrichment_agent
 from .forwarder import forwarder_agent
 from .normalizer import normalizer_agent
 from .router import router_agent
@@ -19,8 +17,8 @@ from .triage import triage_agent
 def _normalize_event(raw_event_json: str) -> str:
     """Normalize a raw log event into a NormalizedEvent JSON.
 
-    Accepts raw JSON from any source (CloudTrail, GCP Audit, Azure, CrowdStrike, K8s, firewall, DDoS).
-    Returns NormalizedEvent JSON or error JSON.
+    Delegates to the normalizer registry for provider-specific parsing.
+    Returns JSON string of the NormalizedEvent or an error dict.
     """
     from ..tools.normalizers.registry import normalize
     try:
@@ -36,10 +34,10 @@ def _validate_normalized_event(event_json: str) -> str:
     from ..models.normalized_event import NormalizedEvent
     try:
         event = NormalizedEvent.model_validate_json(event_json)
-        if event.source_type.value == "unknown":
-            return "invalid: source_type is unknown"
-        if not event.event_name:
-            return "invalid: event_name is empty"
+        if not event.source_type:
+            return "invalid: missing source_type"
+        if not event.event_id:
+            return "invalid: missing event_id"
         return "valid"
     except Exception as exc:
         return f"invalid: {exc}"
@@ -50,46 +48,45 @@ def _emit_metric(event_name: str, data_json: str = "{}") -> str:
     try:
         from ..metrics.emitter import MetricsEmitter
         emitter = MetricsEmitter()
-        emitter.emit(event_name, json.loads(data_json))
+        data = json.loads(data_json) if data_json else {}
+        emitter.emit(event_name, data)
         return "ok"
     except Exception as exc:
         return f"error: {exc}"
 
 
-def _legacy_parse_alert(raw_event_json: str, provider: str) -> str:
-    """Legacy: parse a raw cloud event into an Alert using the old parsers.
+def _parse_n8n_response(n8n_response_json: str, original_event_json: str, route_path: str) -> str:
+    """Parse the n8n webhook response into an EnrichedAlert JSON.
 
-    provider: 'aws' or 'gcp'. Kept for backwards compatibility.
+    Takes the raw n8n response, the original alert/event, and the route path.
+    Returns an EnrichedAlert JSON string.
     """
-    from ..tools.alert_parser import parse_cloudtrail_event, parse_gcp_audit_event
-    raw_event = json.loads(raw_event_json)
-    if provider == "aws":
-        alert = parse_cloudtrail_event(raw_event)
-    elif provider == "gcp":
-        alert = parse_gcp_audit_event(raw_event)
-    else:
-        from ..models.alert import Alert, AlertSeverity
-        alert = Alert(
-            source="unknown",
-            raw_payload=raw_event,
-            severity=AlertSeverity.INFO,
-            event_type="Unknown",
-            raw_event=raw_event,
-            timestamp="",
-        )
-    return alert.model_dump_json()
+    from ..models.alert import Alert
+    from ..n8n.response_parser import parse_response
+    try:
+        n8n_data = json.loads(n8n_response_json)
+        # Try to parse original as Alert; fall back to constructing one
+        try:
+            alert = Alert.model_validate_json(original_event_json)
+        except Exception:
+            raw = json.loads(original_event_json)
+            alert = Alert(source="unknown", raw_payload=raw)
+        enriched = parse_response(n8n_data, alert, route_path)
+        return enriched.model_dump_json()
+    except Exception as exc:
+        return json.dumps({"error": f"parse_failed: {exc}"})
 
 
 orchestrator_agent = LlmAgent(
     name="orchestrator_agent",
     model=settings.model_name,
     description=(
-        "Top-level Tengen security agentic harness orchestrator. "
-        "Drives the full pipeline: normalize → triage → route → runbook → contain → enrich → forward."
+        "Top-level Tengen security orchestrator. "
+        "Drives the pipeline: normalize → triage → route (n8n dispatch) → parse response → forward."
     ),
     instruction=(
-        "You are the OrchestratorAgent for Tengen — a multi-cloud security agentic harness. "
-        "When given a raw security event JSON, execute the full pipeline: "
+        "You are the OrchestratorAgent for Tengen — a multi-cloud security harness. "
+        "When given a raw security event JSON, execute the pipeline: "
         ""
         "STEP 1 — NORMALIZE: "
         "  Call normalize_event with the raw event JSON. "
@@ -104,39 +101,34 @@ orchestrator_agent = LlmAgent(
         "  {status: 'suppressed', reason: <reason>}. "
         "  Call emit_metric('incident_created', {score: <score>}). "
         ""
-        "STEP 3 — ROUTE & RUNBOOK: "
-        "  Transfer to router_agent with the NormalizedEvent JSON. "
-        "  Receive a Finding JSON from the runbook agent. "
-        "  Call emit_metric('runbook_success', {source: <source_type>}). "
+        "STEP 3 — ROUTE TO n8n: "
+        "  Transfer to router_agent with the event JSON. "
+        "  The router will resolve the n8n webhook and dispatch the event. "
+        "  Receive the n8n response JSON (or an error with dlq=true). "
+        "  If dlq=true: call emit_metric('n8n_dispatch_failed') and note the error. "
+        "  Otherwise: call emit_metric('n8n_dispatch_success'). "
         ""
-        "STEP 4 — CONTAIN: "
-        "  Transfer to containment_agent with the Finding JSON. "
-        "  Receive containment result. "
-        "  Call emit_metric('containment_executed', {actions: <count>}). "
+        "STEP 4 — PARSE RESPONSE: "
+        "  Call parse_n8n_response with the n8n response, original event, and route_path. "
+        "  This produces an EnrichedAlert JSON. "
         ""
-        "STEP 5 — ENRICH: "
-        "  Transfer to enrichment_agent with the Finding JSON. "
-        "  Receive the enriched Finding JSON. "
-        ""
-        "STEP 6 — FORWARD: "
-        "  Transfer to forwarder_agent with the enriched Finding JSON. "
+        "STEP 5 — FORWARD: "
+        "  Transfer to forwarder_agent with the EnrichedAlert or Finding JSON. "
         ""
         "FINAL RESPONSE: Return a plain-text summary: "
-        "  event_id, source_type, incident priority score, finding title, "
-        "  severity, containment actions taken (or 'none'), forwarding status."
+        "  event_id, source_type, triage score, n8n route used, "
+        "  enrichment status, forwarding status."
     ),
     tools=[
         FunctionTool(func=_normalize_event),
         FunctionTool(func=_validate_normalized_event),
         FunctionTool(func=_emit_metric),
-        FunctionTool(func=_legacy_parse_alert),
+        FunctionTool(func=_parse_n8n_response),
     ],
     sub_agents=[
         normalizer_agent,
         triage_agent,
         router_agent,
-        containment_agent,
-        enrichment_agent,
         forwarder_agent,
     ],
 )

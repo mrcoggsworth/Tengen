@@ -1,0 +1,32 @@
+version: "1"
+
+routes:
+  aws:
+    description: "Amazon Web Services security events"
+    cloudtrail:
+      description: "CloudTrail API audit logs"
+      root_login:
+        webhook: https://n8n.example.com/webhook/aws-ct-root
+        description: "Root account console or API activity"
+      unauthorized_api:
+        webhook: https://n8n.example.com/webhook/aws-ct-unauth
+        description: "AccessDenied or UnauthorizedAccess events"
+      _default:
+        webhook: https://n8n.example.com/webhook/aws-ct-general
+    _default:
+      webhook: https://n8n.example.com/webhook/aws-general
+
+  crowdstrike:
+    description: "CrowdStrike EDR detections"
+    windows:
+      powershell_execution:
+        webhook: https://n8n.example.com/webhook/cs-win-powershell
+        description: "Suspicious or unknown PowerShell execution"
+      _default:
+        webhook: https://n8n.example.com/webhook/cs-windows
+    _default:
+      webhook: https://n8n.example.com/webhook/cs-general
+
+  _default:
+    webhook: https://n8n.example.com/webhook/general-triage
+    description: "Catch-all for unrecognized vendors or event types"

@@ -18,7 +18,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy source
 COPY tengen/ ./tengen/
-COPY runbooks/ ./runbooks/
 
 # Non-root user for security
 RUN useradd -m -u 1000 tengen && chown -R tengen:tengen /app

@@ -1,8 +1,8 @@
 # Tengen — Agentic Security Harness
 
-Tengen is a production-grade, multi-cloud security agentic harness built on [Google ADK](https://google.github.io/adk-docs/). It ingests security events from any cloud provider or EDR platform, normalizes them into a universal schema, triages and correlates them into incidents, executes real containment actions against live cloud APIs, enriches findings with external threat intelligence, and forwards results to your SIEM — all driven by LLM agents coordinated through a durable RabbitMQ event backbone.
+Tengen is a production-grade, multi-cloud security agentic harness built on [Google ADK](https://google.github.io/adk-docs/). It ingests security events from any cloud provider or EDR platform, normalizes them into a universal schema, triages and correlates them into incidents, dispatches them to n8n workflows via webhook for playbook execution and enrichment, and forwards results to your SIEM — all driven by LLM agents coordinated through a durable RabbitMQ event backbone.
 
-Tengen is the spiritual successor to [LogPose](https://github.com/mrcoggsworth/LogPose), combining LogPose's production infrastructure (durable queuing, consumer pods, enricher pipeline, dashboard, forwarder) with an LLM agentic layer for reasoning, runbook execution, and decision-making.
+Tengen is the spiritual successor to [LogPose](https://github.com/mrcoggsworth/LogPose), combining LogPose's production infrastructure (durable queuing, consumer pods, dashboard, forwarder) with an LLM agentic layer for reasoning, n8n workflow orchestration, and decision-making.
 
 ---
 
@@ -18,11 +18,8 @@ Tengen is the spiritual successor to [LogPose](https://github.com/mrcoggsworth/L
 - [Normalization](#normalization)
 - [Triage and Correlation](#triage-and-correlation)
 - [Routing](#routing)
-- [Runbooks](#runbooks)
-- [Enricher Pipeline](#enricher-pipeline)
-- [Containment](#containment)
-- [External Enrichment](#external-enrichment)
-- [MCP Servers](#mcp-servers)
+- [n8n Connector](#n8n-connector)
+- [n8n Routing Spec](#n8n-routing-spec)
 - [Query Agent](#query-agent)
 - [Forwarder](#forwarder)
 - [Dashboard](#dashboard)
@@ -68,59 +65,36 @@ Tengen is the spiritual successor to [LogPose](https://github.com/mrcoggsworth/L
 └──────────────────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  PHASE 4 — ROUTING  (RouterAgent + RouteRegistry)                         │
+│  PHASE 4 — ROUTING via n8n  (RouterAgent)                                 │
 │                                                                           │
-│  Pure-function first-match routing (deterministic, no LLM for routing)   │
-│  aws.cloudtrail   → [runbook.cloudtrail]                                 │
-│  aws.guardduty    → [runbook.guardduty]                                  │
-│  aws.eks          → [runbook.eks]                                        │
-│  gcp.audit        → [runbook.gcp.event_audit]                            │
-│  azure.activity   → [runbook.azure.activity]                             │
-│  edr.crowdstrike  → [runbook.crowdstrike]                                │
-│  k8s.audit        → [runbook.k8s]                                        │
-│  network.firewall → [runbook.firewall]                                   │
-│  unmatched        → [alerts.dlq]                                         │
+│  resolve_route(vendor, category, event_type)                              │
+│    → hierarchical YAML lookup → n8n webhook URL                          │
+│  execute_webhook(url, payload)                                            │
+│    → POST event to n8n → receive response JSON                           │
+│                                                                           │
+│  no route → [alerts.dlq]        matched → n8n webhook dispatch           │
 └──────────────────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  PHASE 5 — RUNBOOKS  (per-source LlmAgents + EnricherPipeline)           │
+│  PHASE 5 — n8n WORKFLOW EXECUTION  (external)                             │
 │                                                                           │
-│  Each runbook pod:                                                        │
-│    1. EnricherPipeline (staged async, per-enricher timeout, TTL cache)   │
-│    2. LlmAgent reasoning over extracted fields                            │
-│    3. Loads and executes best-match YAML runbook                         │
-│    4. Produces Finding JSON (enriched, with remediation steps)           │
+│  Runs in n8n — playbook execution, enrichment, containment,              │
+│  threat intelligence lookups, and any custom automation.                  │
+│  Returns freeform JSON response to Tengen.                               │
+└──────────────────────────────────────────────────────────────────────────┘
+                          ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│  PHASE 6 — RESPONSE PARSING  (OrchestratorAgent)                          │
+│                                                                           │
+│  parse_n8n_response() → maps freeform JSON to EnrichedAlert              │
+│  Extracts well-known fields: severity, recommendations, iocs, verdict    │
+│  Sets enrichment_error=true on empty/malformed responses                 │
 │                         ↓                                                 │
 │                 RabbitMQ [enriched] queue                                 │
 └──────────────────────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  PHASE 6 — CONTAINMENT  (ContainmentAgent)                                │
-│                                                                           │
-│  CRITICAL / HIGH  → auto-execute containment tools immediately           │
-│  MEDIUM           → return pending_analyst_approval JSON                 │
-│  LOW / INFO       → skip                                                 │
-│                                                                           │
-│  AWS: disable_iam_access_key · revoke_sts_sessions                       │
-│       modify_security_group_deny · disable_iam_user                      │
-│  GCP: disable_service_account · add_vpc_firewall_deny                    │
-│  Azure: disable_azure_ad_user · revoke_azure_refresh_tokens              │
-│  K8s: cordon_node · delete_pod · delete_sa_token · network_policy_deny   │
-└──────────────────────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────────────────────┐
-│  PHASE 7 — EXTERNAL ENRICHMENT  (EnrichmentAgent)                        │
-│                                                                           │
-│  IP reputation → AbuseIPDB / VirusTotal                                  │
-│  IP geolocation → ipinfo.io                                              │
-│  Domain info    → SecurityTrails                                         │
-│  File hash      → VirusTotal                                             │
-│  User context   → Okta / Azure Graph                                     │
-│  Asset context  → CMDB / AWS Config                                      │
-└──────────────────────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────────────────────┐
-│  PHASE 8 — FORWARDING                                                     │
+│  PHASE 7 — FORWARDING                                                     │
 │                                                                           │
 │  EnrichedAlertForwarder → Splunk HEC (batched, retrying, exp. backoff)   │
 │  DLQForwarder           → Splunk HEC (sourcetype: tengen:dlq)            │
@@ -132,8 +106,8 @@ QueryAgent ──────── ad-hoc analyst NL queries across all sources
                     Cross-source IP correlation
 
 Dashboard ──────── FastAPI + browser UI  http://localhost:8080 ────────────
-                   Live queue depths · route counts · runbook stats
-                   containment counts · normalization rates · DLQ depth
+                   Live queue depths · route counts · n8n dispatch stats
+                   normalization rates · DLQ depth
 
 MetricsEmitter ─── fire-and-forget throughout every phase ─────────────────
                    → [tengen.metrics] → MetricsStore (SQLite) → Dashboard
@@ -144,10 +118,10 @@ MetricsEmitter ─── fire-and-forget throughout every phase ─────�
 ## Agent Pipeline
 
 ### OrchestratorAgent (`tengen/agents/orchestrator.py`)
-The top-level coordinator. Drives the complete 6-step pipeline for every event: normalize → triage → route → contain → enrich → forward. Instruments each phase with `MetricsEmitter`. If any step fails, it records the failure and continues where possible rather than dropping the event.
+The top-level coordinator. Drives the complete 5-step pipeline for every event: normalize → triage → route (n8n dispatch) → parse response → forward. Instruments each phase with `MetricsEmitter`. If any step fails, it records the failure and continues where possible rather than dropping the event.
 
-**Tools:** `normalize_event`, `validate_normalized_event`, `emit_metric`, `legacy_parse_alert`
-**Sub-agents:** NormalizerAgent, TriageAgent, RouterAgent, ContainmentAgent, EnrichmentAgent, ForwarderAgent
+**Tools:** `normalize_event`, `validate_normalized_event`, `emit_metric`, `parse_n8n_response`
+**Sub-agents:** NormalizerAgent, TriageAgent, RouterAgent, ForwarderAgent
 
 ### NormalizerAgent (`tengen/agents/normalizer.py`)
 Detects the log source type and normalizes raw events into the universal `NormalizedEvent` schema. Supports all 8 source types. Returns the NormalizedEvent JSON or an error JSON if normalization fails.
@@ -160,49 +134,9 @@ Receives a NormalizedEvent and an in-memory incident store. Correlates the event
 **Tools:** `correlate_event`, `score_incident`, `check_suppression`, `update_incident_score`
 
 ### RouterAgent (`tengen/agents/router.py`)
-Detects the source type and transfers to the correct runbook agent. Uses the `RouteRegistry` for deterministic first-match routing. Falls back to source-type mapping if the raw event cannot be matched by the registry.
+Dispatches security events to n8n workflows via webhook. Analyzes the event to identify vendor, category, and event type, then resolves the matching n8n webhook URL from the hierarchical routing spec. Executes the webhook and returns the n8n response JSON. Unroutable events are sent to the dead-letter queue.
 
-**Tools:** `detect_source_type`, `route_to_queue`
-**Sub-agents:** CloudTrailRunbookAgent, GCPAuditRunbookAgent, AzureRunbookAgent, EDRRunbookAgent, K8sRunbookAgent
-
-### CloudTrailRunbookAgent (`tengen/agents/cloudtrail_runbook.py`)
-Investigates AWS CloudTrail events. Enriches with caller identity, source IP, error context. Loads and executes the best-match AWS runbook YAML. Produces a structured Finding.
-
-**Tools:** `list_aws_runbooks`, `load_aws_runbook`, `enrich_cloudtrail_event`
-
-### GCPAuditRunbookAgent (`tengen/agents/gcp_audit_runbook.py`)
-Investigates GCP Audit Log events. Enriches with principal email, service name, resource name, authorization info. Produces a structured Finding.
-
-**Tools:** `list_gcp_runbooks`, `load_gcp_runbook`, `enrich_gcp_audit_event`
-
-### AzureRunbookAgent (`tengen/agents/azure_runbook.py`)
-Investigates Azure Activity Log events. Extracts caller, operation name, resource, subscription, correlation ID, and source IP. Checks for privilege escalation patterns (role assignments, service principal credential updates). Produces a structured Finding.
-
-**Tools:** `list_azure_runbooks`, `load_azure_runbook`, `enrich_azure_event`, `check_azure_privilege_escalation`
-
-### EDRRunbookAgent (`tengen/agents/edr_runbook.py`)
-Investigates CrowdStrike detections. Extracts MITRE ATT&CK tactics and techniques, file hashes, command lines, device hostname. Classifies into malware_detection, lateral_movement, or credential_dumping. Produces a structured Finding.
-
-**Tools:** `list_edr_runbooks`, `load_edr_runbook`, `enrich_crowdstrike_event`, `classify_threat_type`
-
-### K8sRunbookAgent (`tengen/agents/k8s_runbook.py`)
-Investigates Kubernetes API server audit events. Extracts user, verb, resource, namespace, source IP, user-agent. Classifies into privileged_container, secrets_access, or anomalous_exec. Produces a structured Finding.
-
-**Tools:** `list_k8s_runbooks`, `load_k8s_runbook`, `enrich_k8s_event`, `classify_k8s_threat`
-
-### ContainmentAgent (`tengen/agents/containment.py`)
-Executes real containment actions against live cloud APIs based on Finding severity. CRITICAL/HIGH severities trigger immediate automated execution. MEDIUM returns a pending approval response for analyst review. LOW/INFO are skipped.
-
-**Tools (12 total):**
-- AWS: `disable_iam_access_key`, `revoke_sts_sessions`, `modify_security_group_deny`, `disable_iam_user`
-- GCP: `disable_gcp_service_account`, `add_gcp_firewall_deny`
-- Azure: `disable_azure_ad_user`, `revoke_azure_refresh_tokens`
-- K8s: `cordon_k8s_node`, `delete_k8s_pod`, `delete_k8s_service_account_token`, `create_k8s_network_policy_deny`
-
-### EnrichmentAgent (`tengen/agents/enrichment_agent.py`)
-Examines Finding enrichment fields for available indicators and performs targeted external lookups. Merges all results back into the Finding's enrichment dict. Failed individual lookups are recorded in `enrichment.lookup_errors` rather than stopping the pipeline.
-
-**Tools:** `lookup_ip_reputation`, `lookup_ip_geo`, `lookup_domain`, `lookup_file_hash`, `lookup_user_context`, `lookup_asset_context`
+**Tools:** `resolve_route`, `execute_webhook`
 
 ### QueryAgent (`tengen/agents/query.py`)
 Analyst-facing agent for ad-hoc natural-language security queries. Translates NL questions into targeted API calls across all available data sources. Returns a markdown summary table, key observations, and recommended next actions.
@@ -221,32 +155,10 @@ Tengen/
 ├── Dockerfile                          # Production container image
 ├── pyproject.toml                      # Package metadata + dependencies
 ├── .env.example                        # All configuration variables with descriptions
+├── n8n_routes.example.yaml             # Example n8n routing spec
 │
 ├── docker/
 │   └── docker-compose.yml              # RabbitMQ, Kafka, LocalStack, Pub/Sub emulator
-│
-├── runbooks/                           # YAML runbook definitions (no code changes needed to add)
-│   ├── aws/
-│   │   ├── root_account_usage.yaml
-│   │   └── unauthorized_api_call.yaml
-│   ├── gcp/
-│   │   ├── admin_activity.yaml
-│   │   └── data_access.yaml
-│   ├── azure/
-│   │   ├── unauthorized_access.yaml
-│   │   ├── privilege_escalation.yaml
-│   │   └── suspicious_signin.yaml
-│   ├── edr/
-│   │   ├── malware_detection.yaml
-│   │   ├── lateral_movement.yaml
-│   │   └── credential_dumping.yaml
-│   ├── k8s/
-│   │   ├── privileged_container.yaml
-│   │   ├── secrets_access.yaml
-│   │   └── anomalous_exec.yaml
-│   └── network/
-│       ├── firewall_block_surge.yaml
-│       └── ddos_inbound.yaml
 │
 ├── tengen/
 │   ├── config.py                       # All settings (dataclass, reads from env)
@@ -256,19 +168,18 @@ Tengen/
 │   ├── udm_main.py                     # Entry point: tengen-udm CLI (parse/fields/branch)
 │   │
 │   ├── agents/                         # All LlmAgent definitions
-│   │   ├── orchestrator.py             # Top-level 6-step pipeline coordinator
+│   │   ├── orchestrator.py             # Top-level 5-step pipeline coordinator
 │   │   ├── normalizer.py               # NormalizerAgent
 │   │   ├── triage.py                   # TriageAgent
-│   │   ├── router.py                   # RouterAgent (5 runbook sub-agents)
-│   │   ├── cloudtrail_runbook.py       # AWS CloudTrail investigation
-│   │   ├── gcp_audit_runbook.py        # GCP Audit Log investigation
-│   │   ├── azure_runbook.py            # Azure Activity Log investigation
-│   │   ├── edr_runbook.py              # CrowdStrike EDR investigation
-│   │   ├── k8s_runbook.py              # Kubernetes audit investigation
-│   │   ├── containment.py              # ContainmentAgent (12 tools)
-│   │   ├── enrichment_agent.py         # EnrichmentAgent (6 external lookups)
+│   │   ├── router.py                   # RouterAgent (n8n webhook dispatch)
 │   │   ├── query.py                    # QueryAgent (analyst-facing NL queries)
 │   │   └── forwarder.py                # ForwarderAgent (Splunk + PagerDuty)
+│   │
+│   ├── n8n/                            # n8n webhook integration
+│   │   ├── __init__.py                 # Package exports
+│   │   ├── route_resolver.py           # RouteResolver: hierarchical YAML → webhook URL
+│   │   ├── client.py                   # N8nClient: HTTP POST with retry + exp. backoff
+│   │   └── response_parser.py          # parse_response: freeform JSON → EnrichedAlert
 │   │
 │   ├── consumers/                      # Event ingestion layer
 │   │   ├── base.py                     # BaseConsumer ABC (connect/consume/disconnect)
@@ -291,7 +202,7 @@ Tengen/
 │   │   │                               #   Network/SecurityResult + UDM enums
 │   │   ├── incident.py                 # Incident, IncidentStatus
 │   │   ├── finding.py                  # Finding, RemediationStep
-│   │   ├── enriched_alert.py           # EnrichedAlert (runbook output)
+│   │   ├── enriched_alert.py           # EnrichedAlert (n8n output with enrichment fields)
 │   │   └── runbook.py                  # Runbook, RunbookStep
 │   │
 │   ├── udm/                            # UDM parsing + field-discovery layer
@@ -313,53 +224,20 @@ Tengen/
 │   │       ├── k8s/audit.py
 │   │       └── network/firewall.py
 │   │
-│   ├── enrichers/                      # EnricherPipeline (staged async)
-│   │   ├── protocol.py                 # Enricher Protocol (structural subtyping)
-│   │   ├── context.py                  # EnricherContext dataclass + Principal
-│   │   ├── cache.py                    # PrincipalCache ABC + InProcessTTLCache (LRU+TTL)
-│   │   ├── runner.py                   # EnricherPipeline (ThreadPoolExecutor, budgets)
-│   │   └── cloud/aws/cloudtrail/       # CloudTrail-specific enrichers
-│   │       ├── schema.py               # CloudTrailEnrichment frozen model
-│   │       ├── principal_identity.py   # Stage 0: extract Principal from userIdentity
-│   │       ├── principal_history.py    # Stage 1: CloudTrail lookup_events (last 24h)
-│   │       ├── write_filter.py         # Stage 1: filter to successful write calls
-│   │       └── object_inspection.py    # Stage 2: inspect S3/IAM resources
-│   │
-│   ├── runbooks/                       # BaseRunbook + runbook pod implementations
-│   │   ├── base.py                     # BaseRunbook ABC
-│   │   ├── cloud/aws/cloudtrail.py     # CloudTrailRunbook
-│   │   ├── cloud/gcp/event_audit.py    # GcpEventAuditRunbook
-│   │   ├── cloud/azure/activity.py     # AzureActivityRunbook
-│   │   ├── edr/crowdstrike.py          # CrowdStrikeRunbook
-│   │   └── k8s/audit.py               # K8sAuditRunbook
-│   │
 │   ├── tools/                          # Pure-Python tool functions
 │   │   ├── alert_parser.py             # parse_cloudtrail_event, parse_gcp_audit_event
-│   │   ├── enrichment.py               # Field extraction + 6 external lookups
 │   │   ├── triage_tools.py             # correlate_event, score_incident, check_suppression
 │   │   ├── runbook_loader.py           # list_runbooks, load_runbook (YAML loader)
 │   │   ├── forwarder_tools.py          # forward_to_siem, forward_to_pagerduty
-│   │   ├── normalizers/
-│   │   │   ├── registry.py             # detect_source_type() + normalize() dispatch
-│   │   │   ├── aws_normalizer.py       # CloudTrail → NormalizedEvent
-│   │   │   ├── gcp_normalizer.py       # GCP Audit → NormalizedEvent
-│   │   │   ├── azure_normalizer.py     # Azure Activity → NormalizedEvent
-│   │   │   ├── crowdstrike_normalizer.py  # CS Detection → NormalizedEvent
-│   │   │   ├── firewall_normalizer.py  # Firewall deny → NormalizedEvent
-│   │   │   ├── ddos_normalizer.py      # DDoS flow → NormalizedEvent
-│   │   │   └── k8s_normalizer.py       # K8s audit → NormalizedEvent (OpenShift aware)
-│   │   └── containment/
-│   │       ├── aws_containment.py      # boto3 IAM + EC2 containment
-│   │       ├── gcp_containment.py      # Google IAM + Compute containment
-│   │       ├── azure_containment.py    # Microsoft Graph containment
-│   │       └── k8s_containment.py      # Kubernetes API containment
-│   │
-│   ├── mcp_servers/                    # MCP stdio servers for data retrieval
-│   │   ├── cloudtrail_server.py
-│   │   ├── gcp_audit_server.py
-│   │   ├── azure_activity_server.py
-│   │   ├── crowdstrike_server.py
-│   │   └── k8s_audit_server.py
+│   │   └── normalizers/
+│   │       ├── registry.py             # detect_source_type() + normalize() dispatch
+│   │       ├── aws_normalizer.py       # CloudTrail → NormalizedEvent
+│   │       ├── gcp_normalizer.py       # GCP Audit → NormalizedEvent
+│   │       ├── azure_normalizer.py     # Azure Activity → NormalizedEvent
+│   │       ├── crowdstrike_normalizer.py  # CS Detection → NormalizedEvent
+│   │       ├── firewall_normalizer.py  # Firewall deny → NormalizedEvent
+│   │       ├── ddos_normalizer.py      # DDoS flow → NormalizedEvent
+│   │       └── k8s_normalizer.py       # K8s audit → NormalizedEvent (OpenShift aware)
 │   │
 │   ├── metrics/
 │   │   └── emitter.py                  # MetricsEmitter (fire-and-forget, never raises)
@@ -378,35 +256,39 @@ Tengen/
 │       └── static/index.html           # Dark-themed SPA (polls /api/* every 10s)
 │
 └── tests/
-    ├── test_normalizers.py             # 9 tests: source detection + all 7 normalizers
-    ├── test_triage.py                  # 14 tests: correlate, score, suppress
-    ├── test_containment.py             # 11 tests: all cloud containment tools (mocked)
-    ├── test_enrichment.py              # 8 tests: external lookups (mocked HTTP)
-    ├── test_cloudtrail_runbook.py      # CloudTrail runbook agent tests
-    ├── test_gcp_audit_runbook.py       # GCP runbook agent tests
-    ├── test_models.py                  # Pydantic model validation tests
-    ├── test_orchestrator.py            # Orchestrator pipeline tests
-    ├── test_router.py                  # Router agent tests
+    ├── test_route_resolver.py          # n8n route resolver (9 tests)
+    ├── test_n8n_client.py              # n8n HTTP client (7 tests)
+    ├── test_response_parser.py         # n8n response parser (6 tests)
+    ├── test_enriched_alert.py          # EnrichedAlert model (4 tests)
+    ├── test_router_n8n.py              # Router agent n8n integration (6 tests)
+    ├── test_normalizers.py             # Source detection + all 7 normalizers
+    ├── test_triage.py                  # Correlation, scoring, suppression
+    ├── test_models.py                  # Pydantic model validation
     ├── test_forwarder.py               # Forwarder tests
-    └── test_tools.py                   # Alert parser + enrichment field extraction
+    ├── test_tools.py                   # Alert parser
+    ├── test_udm_model.py               # UDM model tests
+    ├── test_udm_parser.py              # UDM parser tests
+    ├── test_field_registry.py          # Field registry tests
+    ├── test_model_updater.py           # Model updater tests
+    └── test_dashboard_udm.py           # Dashboard UDM endpoint tests
 ```
 
 ---
 
 ## Supported Log Sources
 
-| Source | Normalizer | Route Matcher | Runbook Agent | MCP Server | YAML Runbooks |
-|---|---|---|---|---|---|
-| AWS CloudTrail | `aws_normalizer.py` | `routes/cloud/aws/cloudtrail.py` | `cloudtrail_runbook_agent` | `cloudtrail_server.py` | root_account_usage, unauthorized_api_call |
-| AWS GuardDuty | `aws_normalizer.py` | `routes/cloud/aws/guardduty.py` | `cloudtrail_runbook_agent` | `cloudtrail_server.py` | — |
-| AWS EKS | `aws_normalizer.py` | `routes/cloud/aws/eks.py` | `cloudtrail_runbook_agent` | `cloudtrail_server.py` | — |
-| GCP Audit Log | `gcp_normalizer.py` | `routes/cloud/gcp/event_audit.py` | `gcp_audit_runbook_agent` | `gcp_audit_server.py` | admin_activity, data_access |
-| Azure Activity | `azure_normalizer.py` | `routes/cloud/azure/activity.py` | `azure_runbook_agent` | `azure_activity_server.py` | unauthorized_access, privilege_escalation, suspicious_signin |
-| CrowdStrike EDR | `crowdstrike_normalizer.py` | `routes/edr/crowdstrike.py` | `edr_runbook_agent` | `crowdstrike_server.py` | malware_detection, lateral_movement, credential_dumping |
-| Kubernetes Audit | `k8s_normalizer.py` | `routes/k8s/audit.py` | `k8s_runbook_agent` | `k8s_audit_server.py` | privileged_container, secrets_access, anomalous_exec |
-| OpenShift Audit | `k8s_normalizer.py` | `routes/k8s/audit.py` | `k8s_runbook_agent` | `k8s_audit_server.py` | (inherits K8s runbooks) |
-| Firewall Deny | `firewall_normalizer.py` | `routes/network/firewall.py` | — | — | firewall_block_surge |
-| DDoS Flow | `ddos_normalizer.py` | `routes/network/firewall.py` | — | — | ddos_inbound |
+| Source | Normalizer | Route Matcher | n8n Route |
+|---|---|---|---|
+| AWS CloudTrail | `aws_normalizer.py` | `routes/cloud/aws/cloudtrail.py` | `aws.cloudtrail._default` |
+| AWS GuardDuty | `aws_normalizer.py` | `routes/cloud/aws/guardduty.py` | `aws.guardduty._default` |
+| AWS EKS | `aws_normalizer.py` | `routes/cloud/aws/eks.py` | `aws.eks._default` |
+| GCP Audit Log | `gcp_normalizer.py` | `routes/cloud/gcp/event_audit.py` | `gcp.audit._default` |
+| Azure Activity | `azure_normalizer.py` | `routes/cloud/azure/activity.py` | `azure.activity._default` |
+| CrowdStrike EDR | `crowdstrike_normalizer.py` | `routes/edr/crowdstrike.py` | `crowdstrike.windows._default` |
+| Kubernetes Audit | `k8s_normalizer.py` | `routes/k8s/audit.py` | `k8s.audit._default` |
+| OpenShift Audit | `k8s_normalizer.py` | `routes/k8s/audit.py` | `k8s.audit._default` |
+| Firewall Deny | `firewall_normalizer.py` | `routes/network/firewall.py` | `network.firewall._default` |
+| DDoS Flow | `ddos_normalizer.py` | `routes/network/firewall.py` | `network.ddos._default` |
 
 ---
 
@@ -443,7 +325,7 @@ The universal event schema produced by normalizers. All downstream components wo
 | `outcome` | `Outcome` | `success`, `failure`, `unknown` |
 | `event_name` | `str` | Normalized action name |
 | `severity` | `AlertSeverity` | `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO` |
-| `raw_event` | `dict` | Original raw event (preserved for runbook access) |
+| `raw_event` | `dict` | Original raw event (preserved for n8n workflow access) |
 | `tags` | `list[str]` | Classification tags (tactic, technique, provider) |
 | `labels` | `dict[str, str]` | Key-value metadata for filtering |
 | `vendor_name` | `str` | UDM-aligned vendor (optional; defaulted in `to_udm()`) |
@@ -468,7 +350,7 @@ A correlated group of NormalizedEvents representing a single security incident.
 |---|---|---|
 | `incident_id` | `str` (UUID) | Unique incident ID |
 | `events` | `list[NormalizedEvent]` | All correlated events |
-| `findings` | `list[Finding]` | Findings produced by runbook agents |
+| `findings` | `list[Finding]` | Findings produced by n8n workflows |
 | `status` | `IncidentStatus` | `open`, `triaging`, `contained`, `closed`, `suppressed` |
 | `priority_score` | `float` | Computed priority score |
 | `suppressed` | `bool` | Whether this incident has been suppressed |
@@ -478,7 +360,7 @@ A correlated group of NormalizedEvents representing a single security incident.
 | `labels` | `dict[str, str]` | Metadata labels |
 
 ### `Finding` (`tengen/models/finding.py`)
-The output of a runbook agent. Contains the full investigative result and remediation guidance.
+The output of an n8n workflow investigation. Contains the full investigative result and remediation guidance.
 
 | Field | Type | Description |
 |---|---|---|
@@ -490,6 +372,21 @@ The output of a runbook agent. Contains the full investigative result and remedi
 | `description` | `str` | Full investigation narrative |
 | `remediation_steps` | `list[RemediationStep]` | Ordered remediation actions |
 | `enrichment` | `dict` | All enrichment data (IPs, hashes, user info, asset info) |
+
+### `EnrichedAlert` (`tengen/models/enriched_alert.py`)
+Alert after n8n workflow processing. Published to the enriched queue for forwarding.
+
+| Field | Type | Description |
+|---|---|---|
+| `alert` | `Alert` | Original alert (embedded unchanged) |
+| `runbook` | `str` | Dot-separated identifier (e.g. `n8n.aws.cloudtrail`) |
+| `enriched_at` | `datetime` | UTC timestamp of enrichment |
+| `extracted` | `dict` | Well-known fields extracted from n8n response (severity, recommendations, iocs, verdict) |
+| `runbook_error` | `str \| None` | Error message if n8n workflow failed |
+| `destination` | `Literal` | `"splunk"`, `"universal"`, or `"pagerduty"` |
+| `enrichment` | `dict` | Full n8n response payload |
+| `enrichment_error` | `bool` | `True` if n8n returned empty/malformed response |
+| `n8n_route_path` | `str` | Route path used (e.g. `aws.cloudtrail.root_login`) |
 
 ---
 
@@ -527,15 +424,7 @@ All queue name constants are defined in `tengen/queue/queues.py` — the single 
 | `alerts` | Raw events from all consumers |
 | `normalized` | NormalizedEvent objects after normalization |
 | `incidents` | Scored, non-suppressed Incidents ready for routing |
-| `runbook.cloudtrail` | AWS CloudTrail events |
-| `runbook.guardduty` | AWS GuardDuty findings |
-| `runbook.eks` | AWS EKS events |
-| `runbook.gcp.event_audit` | GCP Audit Log events |
-| `runbook.azure.activity` | Azure Activity Log events |
-| `runbook.crowdstrike` | CrowdStrike EDR detections |
-| `runbook.k8s` | Kubernetes audit events |
-| `runbook.firewall` | Firewall / DDoS events |
-| `enriched` | Enriched Findings ready for forwarding |
+| `enriched` | Enriched alerts ready for forwarding |
 | `alerts.dlq` | Dead-letter queue: unroutable or failed events |
 | `tengen.metrics` | Metrics events (fire-and-forget) |
 
@@ -701,199 +590,127 @@ All routes are auto-registered when `tengen.routing.routes` is imported (which h
 
 ---
 
-## Runbooks
+## n8n Connector
 
-### YAML Runbook Format
-Each YAML runbook defines investigation steps as structured data. No code changes are required to add a new runbook — just create a new YAML file in the appropriate `runbooks/<provider>/` directory.
+The n8n connector replaces the former per-source runbook agents, enricher pipeline, containment tools, and MCP servers with a single integration point. All playbook execution, enrichment, and containment logic now lives in n8n workflows, invoked via webhook dispatch.
+
+### Architecture
+
+The RouterAgent uses two ADK tools to dispatch events to n8n:
+
+1. **`resolve_route(vendor, category, event_type)`** — Walks the hierarchical YAML routing spec to find the most specific matching webhook URL. Falls back through `_default` entries at each level. Raises `NoRouteError` if no match exists at any level.
+
+2. **`execute_webhook(webhook_url, payload_json)`** — POSTs the event payload to the resolved n8n webhook URL and returns the JSON response. Handles retries and error classification.
+
+### Route Resolver (`tengen/n8n/route_resolver.py`)
+
+The `RouteResolver` loads a hierarchical YAML file and resolves `vendor → category → event_type` to a webhook URL.
+
+- **Hierarchical lookup** — walks from most specific (vendor + category + event_type) to least specific (root `_default`)
+- **`_default` fallback** — every level can define a `_default` entry that catches unmatched children
+- **File watcher** — checks file mtime on every `resolve()` call and reloads if changed, enabling ConfigMap updates without pod restarts
+- **`RouteMatch`** — frozen dataclass returned on success: `webhook_url`, `route_path`, `description`
+- **`NoRouteError`** — raised when no route matches at any level, including root `_default`
+
+### HTTP Client (`tengen/n8n/client.py`)
+
+The `N8nClient` POSTs payloads to n8n webhook URLs with built-in resilience:
+
+- **Retry with exponential backoff** — retries on 5xx, timeout, and connection errors up to `N8N_MAX_RETRIES` (default: 3)
+- **Backoff formula** — `N8N_BACKOFF_BASE ^ attempt` seconds between retries (default base: 2 → waits 2s, 4s, 8s)
+- **No retry on 4xx** — client errors are not transient and are routed directly to DLQ
+- **DLQ on exhaustion** — after all retries fail, raises `N8nRequestFailed` so the orchestrator routes to the dead-letter queue
+- **Configurable timeout** — per-request timeout via `N8N_TIMEOUT` (default: 30 seconds)
+
+### Response Parser (`tengen/n8n/response_parser.py`)
+
+`parse_response()` maps the freeform JSON returned by n8n workflows into an `EnrichedAlert`:
+
+- Preserves the original `Alert` unchanged
+- Stores the entire n8n response in the `enrichment` dict
+- Extracts well-known fields (`severity`, `recommendations`, `iocs`, `verdict`) into `extracted` if present
+- Sets `enrichment_error=True` on empty or `None` responses
+- Records the `n8n_route_path` for traceability
+
+### Error Handling
+
+| n8n Response | Tengen Behavior |
+|---|---|
+| 2xx with valid JSON | Parse into EnrichedAlert, forward to Splunk |
+| 5xx / timeout / connection error | Retry with exponential backoff up to max retries |
+| Retries exhausted (5xx) | Route to DLQ, emit `n8n_dispatch_failed` metric |
+| 4xx (client error) | No retry, route to DLQ immediately |
+| 2xx with empty/malformed body | Set `enrichment_error=True` on EnrichedAlert, forward anyway |
+
+### Deployment
+
+The n8n routing spec is deployed as an OpenShift ConfigMap mounted into the pod filesystem:
 
 ```yaml
-name: example_runbook
-description: >
-  What this runbook investigates.
-steps:
-  - id: step_name
-    description: What to do in this step.
-    actions:
-      - Extract: specific fields from the event
-      - Check: condition against extracted data
-      - Query: data source for correlated activity
-    severity_matrix:
-      CRITICAL: conditions that warrant CRITICAL
-      HIGH: conditions that warrant HIGH
-  - id: containment
-    description: Containment actions to take.
-    actions:
-      - If severity in [CRITICAL, HIGH]: containment_action(parameters)
-  - id: produce_finding
-    description: Output the structured Finding.
-    output_fields:
-      - finding_id
-      - source
-      - severity
-      - title
-      - description
-      - enrichment
-      - remediation_steps
+# ConfigMap mount
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tengen-n8n-routes
+data:
+  n8n_routes.yaml: |
+    # ... routing spec contents ...
 ```
 
-### Available Runbooks
-
-**AWS (`runbooks/aws/`)**
-- `root_account_usage.yaml` — AWS root account API activity
-- `unauthorized_api_call.yaml` — AccessDenied / UnauthorizedOperation errors
-
-**GCP (`runbooks/gcp/`)**
-- `admin_activity.yaml` — GCP admin write operations
-- `data_access.yaml` — GCP data read operations
-
-**Azure (`runbooks/azure/`)**
-- `unauthorized_access.yaml` — Failed logins, unexpected API calls, anomalous access patterns
-- `privilege_escalation.yaml` — Role assignments, service principal credential updates, AAD directory changes
-- `suspicious_signin.yaml` — Impossible travel, anonymous proxy, credential spray, MFA bypass
-
-**EDR (`runbooks/edr/`)**
-- `malware_detection.yaml` — File-based malware, ransomware, droppers; SHA256 enrichment, scope assessment
-- `lateral_movement.yaml` — Pass-the-hash, WMI, PsExec, SMB, RDP; movement path reconstruction
-- `credential_dumping.yaml` — LSASS, SAM, NTDS.dit, DCSync; domain-wide impact assessment
-
-**Kubernetes (`runbooks/k8s/`)**
-- `privileged_container.yaml` — Privileged pod creation; host breakout risk assessment
-- `secrets_access.yaml` — Anomalous secret reads; baseline comparison, exfiltration detection
-- `anomalous_exec.yaml` — kubectl exec/attach; command analysis, SA token exposure assessment
-
-**Network (`runbooks/network/`)**
-- `firewall_block_surge.yaml` — Port scan, brute-force; IP reputation enrichment, geo-blocking
-- `ddos_inbound.yaml` — Volumetric, protocol, application-layer attacks; mitigation strategy selection
+Set the `N8N_ROUTES_PATH` environment variable to the mount path (default: `/etc/tengen/n8n_routes.yaml`). The `RouteResolver` watches the file for changes, so ConfigMap updates propagate without pod restarts.
 
 ---
 
-## Enricher Pipeline
+## n8n Routing Spec
 
-The `EnricherPipeline` (`tengen/enrichers/runner.py`) runs cloud-specific enrichers in stages with a total budget timeout (default: 8 seconds).
+The routing spec is a hierarchical YAML file that maps `vendor → category → event_type` to n8n webhook URLs. Every level supports a `_default` fallback for unmatched events.
 
-### Execution Model
-- **Stage 0 enrichers** run first and sequentially (they extract foundation data like principal identity)
-- **Stage 1+ enrichers** run in parallel within each stage using `ThreadPoolExecutor`
-- Each enricher has an individual timeout (default: 3 seconds per enricher)
-- A total budget timeout caps the entire pipeline (default: 8 seconds)
-- Enricher failures are recorded in `context.errors` but do not stop the pipeline
+### Example
 
-### CloudTrail Enrichers
+```yaml
+version: "1"
 
-| Enricher | Stage | Purpose |
-|---|---|---|
-| `PrincipalIdentityEnricher` | 0 | Extracts `Principal` from `userIdentity` (ARN, account ID, session context) |
-| `PrincipalHistoryEnricher` | 1 (parallel) | CloudTrail `lookup_events` for this principal in the last 24h |
-| `WriteFilterEnricher` | 1 (parallel) | Filters to successful write/mutate API calls only |
-| `ObjectInspectionEnricher` | 2 | Inspects referenced S3/IAM resources for sensitivity |
+routes:
+  aws:
+    description: "Amazon Web Services security events"
+    cloudtrail:
+      description: "CloudTrail API audit logs"
+      root_login:
+        webhook: https://n8n.example.com/webhook/aws-ct-root
+        description: "Root account console or API activity"
+      unauthorized_api:
+        webhook: https://n8n.example.com/webhook/aws-ct-unauth
+        description: "AccessDenied or UnauthorizedAccess events"
+      _default:
+        webhook: https://n8n.example.com/webhook/aws-ct-general
+    _default:
+      webhook: https://n8n.example.com/webhook/aws-general
 
-### InProcessTTLCache (`tengen/enrichers/cache.py`)
-LRU+TTL cache backed by `OrderedDict`. Injectable clock for deterministic testing. Configurable max size (default: 1024 entries) and TTL per enricher.
+  crowdstrike:
+    description: "CrowdStrike EDR detections"
+    windows:
+      powershell_execution:
+        webhook: https://n8n.example.com/webhook/cs-win-powershell
+        description: "Suspicious or unknown PowerShell execution"
+      _default:
+        webhook: https://n8n.example.com/webhook/cs-windows
+    _default:
+      webhook: https://n8n.example.com/webhook/cs-general
 
----
+  _default:
+    webhook: https://n8n.example.com/webhook/general-triage
+    description: "Catch-all for unrecognized vendors or event types"
+```
 
-## Containment
+### Resolution Order
 
-All containment functions follow this contract:
-- Accept `finding_json: str` as the first argument (the full Finding for context)
-- Return a JSON string: `{"action": str, "status": "success" | "error", ...details}`
-- Never raise exceptions — all errors are caught and returned as JSON
+For a request `resolve_route("aws", "cloudtrail", "root_login")`:
 
-### AWS Containment (`tengen/tools/containment/aws_containment.py`)
-
-| Function | Action |
-|---|---|
-| `disable_iam_access_key(finding_json, access_key_id)` | Sets IAM access key status to `Inactive` |
-| `revoke_sts_sessions(finding_json, username)` | Attaches a `DenyAll` inline policy with `DateLessThan` condition to invalidate active STS sessions |
-| `modify_security_group_deny(finding_json, group_id, source_ip)` | Revokes all ingress permissions for the source IP from the security group |
-| `disable_iam_user(finding_json, username)` | Disables all access keys for the user |
-
-### GCP Containment (`tengen/tools/containment/gcp_containment.py`)
-
-| Function | Action |
-|---|---|
-| `disable_service_account(finding_json, sa_email, project_id)` | Calls IAM `projects.serviceAccounts.disable` |
-| `add_vpc_firewall_deny(finding_json, project_id, source_ip, network)` | Inserts a `priority=900` INGRESS DENY ALL rule for the source IP |
-
-### Azure Containment (`tengen/tools/containment/azure_containment.py`)
-
-| Function | Action |
-|---|---|
-| `disable_azure_ad_user(finding_json, user_id)` | PATCH `https://graph.microsoft.com/v1.0/users/{user_id}` with `accountEnabled: false` |
-| `revoke_azure_refresh_tokens(finding_json, user_id)` | POST `revokeSignInSessions` on Microsoft Graph API |
-
-Both Azure functions obtain a fresh OAuth2 `client_credentials` token before each call using `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`.
-
-### Kubernetes Containment (`tengen/tools/containment/k8s_containment.py`)
-
-| Function | Action |
-|---|---|
-| `cordon_node(finding_json, node_name)` | PATCH node spec `unschedulable: true` |
-| `delete_pod(finding_json, namespace, pod_name)` | Deletes the pod immediately (no grace period) |
-| `delete_service_account_token(finding_json, namespace, secret_name)` | Deletes the SA token secret |
-| `create_network_policy_deny(finding_json, namespace, label_selector)` | Creates a `tengen-quarantine` NetworkPolicy denying all Ingress and Egress for matching pods |
-
-All K8s functions auto-detect in-cluster config, falling back to `K8S_KUBECONFIG` or default `~/.kube/config`.
-
----
-
-## External Enrichment
-
-All external enrichment functions are in `tengen/tools/enrichment.py`. They all return JSON strings and never raise exceptions.
-
-### `lookup_ip_reputation(ip: str) -> str`
-Primary: AbuseIPDB (`ABUSE_IPDB_KEY`) — returns abuse confidence score, country, ISP, total reports, Tor status.
-Fallback: VirusTotal (`VT_API_KEY`) — returns malicious engine count ratio as abuse score.
-
-Returns: `{ip, abuse_score, country, isp, total_reports, is_tor, source}`
-
-### `lookup_ip_geo(ip: str) -> str`
-ipinfo.io (`IPINFO_TOKEN` optional — free tier works without it).
-Returns: `{ip, city, region, country, org, timezone, loc}`
-
-### `lookup_domain(domain: str) -> str`
-SecurityTrails API (`SECURITYTRAILS_API_KEY`).
-Returns: `{domain, registrar, created, expires, name_servers, categories, alexa_rank, source}`
-
-### `lookup_file_hash(sha256: str) -> str`
-VirusTotal (`VT_API_KEY`).
-Returns: `{sha256, malicious, suspicious, harmless, undetected, names, tags, type_description, source}`
-
-### `lookup_user_context(identifier: str) -> str`
-Primary: Okta (`OKTA_API_TOKEN` + `OKTA_DOMAIN`) — returns full user profile, MFA status, account status, last login.
-Fallback: Azure Graph (`AZURE_TENANT_ID` + `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET`).
-Returns: `{id, email, display_name, department, title, manager, mfa_enrolled, last_login, account_enabled, groups, source}`
-
-### `lookup_asset_context(asset_id: str) -> str`
-Primary: CMDB REST API (`CMDB_ENDPOINT` + optional `CMDB_TOKEN`).
-Fallback for AWS ARNs: AWS Config `get_resource_config_history`.
-Returns: `{asset_id, name, type, owner, env, tags, compliance_violations, source}`
-
----
-
-## MCP Servers
-
-All MCP servers use stdio transport and are compatible with any MCP client. Start them with `python -m tengen.mcp_servers.<server_name>`.
-
-### `cloudtrail_server.py`
-Tools: `get_cloudtrail_events(start_time, end_time, event_name?, max_results?)`, `get_cloudtrail_event_by_id(event_id)`
-Requires: standard AWS credentials (boto3)
-
-### `gcp_audit_server.py`
-Tools: `get_gcp_audit_logs(project_id, start_time, end_time, principal_email?, max_results?)`, `get_gcp_audit_log_by_id(log_name, insert_id)`
-Requires: `GCP_PROJECT_ID`, Google Application Default Credentials
-
-### `azure_activity_server.py`
-Tools: `get_azure_activity_logs(subscription_id, start_time, end_time, resource_group?, caller?, max_results?)`, `get_azure_activity_log_by_correlation_id(subscription_id, correlation_id)`, `get_azure_signin_logs(start_time, end_time, user_principal_name?, max_results?)`
-Requires: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
-
-### `crowdstrike_server.py`
-Tools: `get_cs_detections(start_time, end_time, severity?, max_results?)`, `get_cs_detection_by_id(detection_id)`, `get_cs_events(event_type?, start_time?, end_time?, max_results?)`, `get_cs_incidents(start_time, end_time, state?, max_results?)`
-Requires: `CROWDSTRIKE_CLIENT_ID`, `CROWDSTRIKE_CLIENT_SECRET`, `CROWDSTRIKE_BASE_URL`
-
-### `k8s_audit_server.py`
-Tools: `get_k8s_audit_events(namespace?, verb?, user?, resource?, start_time?, max_results?)`, `get_k8s_pod_events(namespace, pod_name)`, `get_k8s_secrets_access(namespace?, start_time?, max_results?)`, `get_k8s_privileged_operations(namespace?, start_time?, max_results?)`
-Requires: in-cluster config or `K8S_KUBECONFIG`
+1. Check `routes.aws.cloudtrail.root_login` — if it has a `webhook`, return it
+2. Check `routes.aws.cloudtrail._default` — category-level fallback
+3. Check `routes.aws._default` — vendor-level fallback
+4. Check `routes._default` — root-level catch-all
+5. Raise `NoRouteError` if none matched
 
 ---
 
@@ -947,15 +764,13 @@ tengen-dashboard
 | `GET /api/queues` | Live RabbitMQ queue depths via the Management API |
 | `GET /api/metrics` | Aggregated metrics from MetricsStore (SQLite) |
 | `GET /api/routes` | All registered routes from RouteRegistry |
-| `GET /api/runbooks` | All discovered runbook classes and their source queues |
 | `GET /api/agents` | LLM agent activity from metrics (which agents ran, error counts) |
 
 ### Dashboard UI (`tengen/dashboard/static/index.html`)
 Dark-themed single-page application. Polls all `/api/*` endpoints every 10 seconds. Displays:
 - Queue depth chart for all RabbitMQ queues
 - Route match counts (which routes are getting the most traffic)
-- Runbook success/error rates
-- Containment action counts
+- n8n dispatch success/failure rates
 - Normalization source breakdown
 - DLQ depth (highlighted in red when non-zero)
 
@@ -976,13 +791,8 @@ Fire-and-forget metric publisher. Never raises exceptions. Emits structured JSON
 | `incident_updated` | Triage | `{incident_id, event_count}` |
 | `route_matched` | Routing | `{route, queue}` |
 | `dlq_enqueued` | Routing | `{reason}` |
-| `runbook_success` | Runbook | `{runbook, source, duration_ms}` |
-| `runbook_error` | Runbook | `{runbook, error}` |
-| `enricher_duration_ms` | Enricher | `{enricher_name, duration_ms}` |
-| `containment_executed` | Containment | `{action, cloud, severity}` |
-| `containment_skipped` | Containment | `{reason, severity}` |
-| `enrichment_latency_ms` | Enrichment | `{lookup_type, duration_ms}` |
-| `enrichment_error` | Enrichment | `{lookup_type, error}` |
+| `n8n_dispatch_success` | n8n | `{route_path, duration_ms}` |
+| `n8n_dispatch_failed` | n8n | `{route_path, error, attempts}` |
 | `forwarding_success` | Forwarder | `{destination, count}` |
 | `forwarding_failure` | Forwarder | `{destination, error}` |
 
@@ -1001,6 +811,15 @@ Copy `.env.example` to `.env` and fill in the values for the integrations you us
 |---|---|
 | `GOOGLE_API_KEY` | Gemini API key for all LLM agents |
 | `RABBITMQ_URL` | RabbitMQ connection URL (e.g. `amqp://guest:guest@localhost:5672/`) |
+
+### n8n
+
+| Variable | Default | Description |
+|---|---|---|
+| `N8N_ROUTES_PATH` | `/etc/tengen/n8n_routes.yaml` | Path to the n8n routing spec YAML file |
+| `N8N_TIMEOUT` | `30` | HTTP request timeout in seconds for n8n webhook calls |
+| `N8N_MAX_RETRIES` | `3` | Maximum retry attempts on 5xx / timeout / connection errors |
+| `N8N_BACKOFF_BASE` | `2` | Base for exponential backoff between retries (seconds) |
 
 ### AWS
 
@@ -1085,19 +904,6 @@ Copy `.env.example` to `.env` and fill in the values for the integrations you us
 | `UNIVERSAL_HTTP_HOST` | `0.0.0.0` | Ingest endpoint bind host |
 | `UNIVERSAL_HTTP_PORT` | `8088` | Ingest endpoint bind port |
 | `UNIVERSAL_HTTP_TOKEN` | — | Bearer token for ingest authentication (optional) |
-
-### External Enrichment
-
-| Variable | Description |
-|---|---|
-| `ABUSE_IPDB_KEY` | AbuseIPDB API key for IP reputation |
-| `VT_API_KEY` | VirusTotal API key (IP reputation fallback + file hash lookup) |
-| `IPINFO_TOKEN` | ipinfo.io token (optional — free tier works without it) |
-| `SECURITYTRAILS_API_KEY` | SecurityTrails API key for domain lookups |
-| `OKTA_API_TOKEN` | Okta SSWS API token for user context |
-| `OKTA_DOMAIN` | Okta org domain (e.g. `your-org.okta.com`) |
-| `CMDB_ENDPOINT` | CMDB REST API base URL for asset context |
-| `CMDB_TOKEN` | CMDB Bearer token (optional) |
 
 ### PagerDuty
 
@@ -1258,15 +1064,21 @@ docker compose -f docker/docker-compose.yml logs -f router
 pytest
 
 # By category
-pytest tests/test_normalizers.py    # Source detection + all 7 normalizers (9 tests)
-pytest tests/test_triage.py         # Correlation, scoring, suppression (14 tests)
-pytest tests/test_containment.py    # Cloud containment tools — mocked (11 tests)
-pytest tests/test_enrichment.py     # External lookups — mocked HTTP (8 tests)
-pytest tests/test_models.py         # Pydantic model validation
-pytest tests/test_cloudtrail_runbook.py
-pytest tests/test_gcp_audit_runbook.py
-pytest tests/test_orchestrator.py
-pytest tests/test_router.py
+pytest tests/test_route_resolver.py     # n8n route resolver (9 tests)
+pytest tests/test_n8n_client.py         # n8n HTTP client (7 tests)
+pytest tests/test_response_parser.py    # n8n response parser (6 tests)
+pytest tests/test_enriched_alert.py     # EnrichedAlert model (4 tests)
+pytest tests/test_router_n8n.py         # Router agent n8n integration (6 tests)
+pytest tests/test_normalizers.py        # Source detection + all 7 normalizers
+pytest tests/test_triage.py             # Correlation, scoring, suppression
+pytest tests/test_models.py             # Pydantic model validation
+pytest tests/test_forwarder.py          # Forwarder tests
+pytest tests/test_tools.py             # Alert parser
+pytest tests/test_udm_model.py          # UDM model tests
+pytest tests/test_udm_parser.py         # UDM parser tests
+pytest tests/test_field_registry.py     # Field registry tests
+pytest tests/test_model_updater.py      # Model updater tests
+pytest tests/test_dashboard_udm.py      # Dashboard UDM endpoint tests
 
 # With coverage
 pytest --cov=tengen --cov-report=term-missing
@@ -1286,31 +1098,22 @@ All tests are fully offline — cloud SDK calls are mocked. No external services
 4. **Add a route matcher** in `tengen/routing/routes/<category>/<source>.py` using `@registry.register(QUEUE_NAME)`
 5. **Import the route** in `tengen/routing/routes/__init__.py` so it auto-registers
 6. **Add a queue constant** to `tengen/queue/queues.py`
-7. **Create YAML runbooks** in `runbooks/<source>/`
-8. **Optionally create a runbook agent** in `tengen/agents/<source>_runbook.py` and add it as a sub-agent of `router_agent`
+7. **Add a route entry** in `n8n_routes.yaml` pointing to your n8n workflow webhook
+8. **Create the n8n workflow** in your n8n instance to handle events for this source
 9. **Add tests** in `tests/test_normalizers.py`
 
-### Adding a new runbook (no code required)
+### Adding a new n8n workflow
 
-Just create a YAML file in the appropriate `runbooks/<provider>/` directory following the runbook format. The `runbook_loader.py` will discover it automatically.
-
-### Adding a new containment action
-
-1. Add the function to the appropriate `tengen/tools/containment/<cloud>_containment.py`
-2. Add a wrapper function and `FunctionTool` in `tengen/agents/containment.py`
-3. Update the ContainmentAgent instruction to describe when to use it
-4. Add a test in `tests/test_containment.py`
-
-### Adding a new external enrichment lookup
-
-1. Add the function to `tengen/tools/enrichment.py` (return JSON string, never raise)
-2. Add a `FunctionTool` in `tengen/agents/enrichment_agent.py`
-3. Update the EnrichmentAgent instruction to describe when to call it
-4. Add the env var to `tengen/config.py` and `.env.example`
-
-### Adding a new MCP server
-
-1. Create `tengen/mcp_servers/<source>_server.py` following the existing server pattern
-2. Implement `list_tools()` and `call_tool()` handlers
-3. Add `async def main()` with `stdio_server` transport
-4. Optionally wire as a tool source in the QueryAgent
+1. **Design the workflow** in n8n — it will receive the full event payload as a JSON POST body and must return a JSON response
+2. **Add a route entry** to your `n8n_routes.yaml` at the appropriate level:
+   ```yaml
+   routes:
+     <vendor>:
+       <category>:
+         <event_type>:
+           webhook: https://your-n8n.example.com/webhook/<your-workflow-id>
+           description: "What this workflow handles"
+   ```
+3. **Use `_default` entries** for catch-all handling — if your workflow handles all events for a vendor or category, place it at that level
+4. **Return structured JSON** from the workflow — the response parser extracts well-known fields (`severity`, `recommendations`, `iocs`, `verdict`) automatically
+5. **Reload without restart** — update the ConfigMap; the RouteResolver detects file changes on the next request

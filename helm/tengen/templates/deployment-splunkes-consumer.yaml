@@ -1,0 +1,66 @@
+{{- if .Values.splunkEs.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tengen.fullname" . }}-splunkes-consumer
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: splunkes-consumer
+spec:
+  replicas: {{ .Values.splunkEs.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tengen.componentLabels" (dict "root" . "component" "splunkes-consumer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tengen.componentLabels" (dict "root" . "component" "splunkes-consumer") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tengen.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: splunkes-consumer
+          image: {{ include "tengen.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "tengen.consumers.splunk_es_consumer"]
+          env:
+            {{- include "tengen.commonEnv" . | nindent 12 }}
+            - name: SPLUNK_ES_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tengen.secretName" . }}
+                  key: splunk-es-host
+                  optional: true
+            - name: SPLUNK_ES_PORT
+              value: {{ .Values.splunk.esPort | quote }}
+            - name: SPLUNK_ES_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tengen.secretName" . }}
+                  key: splunk-es-token
+                  optional: true
+            - name: SPLUNK_ES_SEARCH
+              value: {{ .Values.splunk.esSearch | quote }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.splunkEs.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

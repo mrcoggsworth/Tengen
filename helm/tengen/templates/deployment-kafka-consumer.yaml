@@ -1,0 +1,56 @@
+{{- if .Values.kafkaConsumer.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tengen.fullname" . }}-kafka-consumer
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kafka-consumer
+spec:
+  replicas: {{ .Values.kafkaConsumer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tengen.componentLabels" (dict "root" . "component" "kafka-consumer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tengen.componentLabels" (dict "root" . "component" "kafka-consumer") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tengen.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: kafka-consumer
+          image: {{ include "tengen.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "tengen.consumers.kafka_consumer"]
+          env:
+            {{- include "tengen.commonEnv" . | nindent 12 }}
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            - name: KAFKA_GROUP_ID
+              value: {{ .Values.kafka.groupId | quote }}
+            - name: KAFKA_TOPICS
+              value: {{ .Values.kafka.topics | quote }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.kafkaConsumer.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

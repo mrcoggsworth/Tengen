@@ -1,0 +1,50 @@
+{{- if .Values.sqs.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tengen.fullname" . }}-sqs-consumer
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sqs-consumer
+spec:
+  replicas: {{ .Values.sqs.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tengen.componentLabels" (dict "root" . "component" "sqs-consumer") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tengen.componentLabels" (dict "root" . "component" "sqs-consumer") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tengen.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: sqs-consumer
+          image: {{ include "tengen.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "tengen.consumers.sqs_consumer"]
+          env:
+            {{- include "tengen.commonEnv" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.sqs.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,55 @@
+Tengen has been deployed to namespace {{ .Release.Namespace }}.
+
+Components:
+  - Router:    {{ include "tengen.fullname" . }}-router
+  - Forwarder: {{ include "tengen.fullname" . }}-forwarder
+  - Dashboard: {{ include "tengen.fullname" . }}-dashboard
+  - Ingest:    {{ include "tengen.fullname" . }}-ingest
+{{- if .Values.sqs.enabled }}
+  - SQS Consumer: {{ include "tengen.fullname" . }}-sqs-consumer
+{{- end }}
+{{- if .Values.kafkaConsumer.enabled }}
+  - Kafka Consumer: {{ include "tengen.fullname" . }}-kafka-consumer
+{{- end }}
+{{- if .Values.pubsub.enabled }}
+  - Pub/Sub Consumer: {{ include "tengen.fullname" . }}-pubsub-consumer
+{{- end }}
+{{- if .Values.splunkEs.enabled }}
+  - Splunk ES Consumer: {{ include "tengen.fullname" . }}-splunkes-consumer
+{{- end }}
+
+RabbitMQ:
+{{- if .Values.rabbitmq.enabled }}
+  Deployed as subchart: {{ .Release.Name }}-rabbitmq
+  Management UI: oc port-forward svc/{{ .Release.Name }}-rabbitmq 15672:15672
+{{- else }}
+  External: {{ .Values.externalRabbitmq.url }}
+{{- end }}
+
+{{- if .Values.dashboard.route.enabled }}
+
+Dashboard URL:
+  oc get route {{ include "tengen.fullname" . }}-dashboard -o jsonpath='{.spec.host}'
+{{- end }}
+
+{{- if .Values.ingest.route.enabled }}
+
+Ingest URL:
+  oc get route {{ include "tengen.fullname" . }}-ingest -o jsonpath='{.spec.host}'
+
+Send a test event:
+  INGEST_URL=$(oc get route {{ include "tengen.fullname" . }}-ingest -o jsonpath='{.spec.host}')
+  curl -X POST "https://${INGEST_URL}/ingest" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer <your-token>" \
+    -d '{"eventSource": "iam.amazonaws.com", "eventName": "CreateAccessKey"}'
+{{- end }}
+
+n8n Routing Spec:
+  Mounted at: {{ .Values.n8n.routesPath }}
+  ConfigMap:  {{ include "tengen.fullname" . }}-n8n-routes
+
+  Update routes without redeploying:
+    oc create configmap {{ include "tengen.fullname" . }}-n8n-routes \
+      --from-file={{ base .Values.n8n.routesPath }}=n8n_routes.yaml \
+      -o yaml --dry-run=client | oc apply -f -

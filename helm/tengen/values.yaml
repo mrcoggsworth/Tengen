@@ -1,0 +1,293 @@
+# -- Global ---------------------------------------------------------------
+
+replicaCount: 1
+
+image:
+  # OpenShift internal registry. Override for external registries.
+  repository: image-registry.openshift-image-registry.svc:5000/NAMESPACE/tengen
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Secrets ---------------------------------------------------------------
+# When existingSecret is set, the chart references it instead of creating one.
+# The Secret must contain the keys listed below.
+existingSecret: ""
+
+# Values used to create a Secret when existingSecret is empty.
+secrets:
+  googleApiKey: ""
+  rabbitmqUrl: "amqp://guest:guest@{{ .Release.Name }}-rabbitmq:5672/"
+  splunkHecUrl: ""
+  splunkHecToken: ""
+  splunkEsHost: ""
+  splunkEsToken: ""
+  pagerdutyApiKey: ""
+  universalHttpToken: ""
+  # Cloud provider credentials
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  azureTenantId: ""
+  azureClientId: ""
+  azureClientSecret: ""
+  crowdstrikeClientId: ""
+  crowdstrikeClientSecret: ""
+
+# -- n8n Connector ---------------------------------------------------------
+
+n8n:
+  timeout: 30
+  maxRetries: 3
+  backoffBase: 2
+  # The routing spec YAML. Rendered into a ConfigMap and mounted at routesPath.
+  routesPath: /etc/tengen/n8n_routes.yaml
+  routes: |
+    version: "1"
+
+    routes:
+      aws:
+        description: "Amazon Web Services security events"
+        cloudtrail:
+          description: "CloudTrail API audit logs"
+          root_login:
+            webhook: https://n8n.example.com/webhook/aws-ct-root
+            description: "Root account console or API activity"
+          unauthorized_api:
+            webhook: https://n8n.example.com/webhook/aws-ct-unauth
+            description: "AccessDenied or UnauthorizedAccess events"
+          _default:
+            webhook: https://n8n.example.com/webhook/aws-ct-general
+        guardduty:
+          _default:
+            webhook: https://n8n.example.com/webhook/aws-guardduty
+        _default:
+          webhook: https://n8n.example.com/webhook/aws-general
+
+      crowdstrike:
+        description: "CrowdStrike EDR detections"
+        windows:
+          powershell_execution:
+            webhook: https://n8n.example.com/webhook/cs-win-powershell
+            description: "Suspicious or unknown PowerShell execution"
+          _default:
+            webhook: https://n8n.example.com/webhook/cs-windows
+        _default:
+          webhook: https://n8n.example.com/webhook/cs-general
+
+      gcp:
+        audit:
+          _default:
+            webhook: https://n8n.example.com/webhook/gcp-audit
+        _default:
+          webhook: https://n8n.example.com/webhook/gcp-general
+
+      azure:
+        signin:
+          _default:
+            webhook: https://n8n.example.com/webhook/azure-signin
+        _default:
+          webhook: https://n8n.example.com/webhook/azure-general
+
+      k8s:
+        audit:
+          privileged_container:
+            webhook: https://n8n.example.com/webhook/k8s-privileged
+            description: "Privileged container launch or escalation"
+          secrets_access:
+            webhook: https://n8n.example.com/webhook/k8s-secrets
+          _default:
+            webhook: https://n8n.example.com/webhook/k8s-audit
+        _default:
+          webhook: https://n8n.example.com/webhook/k8s-general
+
+      _default:
+        webhook: https://n8n.example.com/webhook/general-triage
+        description: "Catch-all for unrecognized vendors or event types"
+
+# -- LLM ------------------------------------------------------------------
+
+modelName: gemini-2.0-flash
+
+# -- Cloud providers (non-secret config) -----------------------------------
+
+aws:
+  region: us-east-1
+  endpointUrl: ""
+  sqsQueueUrl: ""
+
+gcp:
+  projectId: ""
+  pubsubProjectId: ""
+  pubsubSubscriptionId: ""
+  pubsubEmulatorHost: ""
+
+azure:
+  subscriptionId: ""
+
+crowdstrike:
+  baseUrl: https://api.crowdstrike.com
+
+k8s:
+  kubeconfig: ""
+
+kafka:
+  bootstrapServers: ""
+  groupId: tengen
+  topics: security-events
+
+splunk:
+  index: tengen
+  batchSize: 25
+  esPort: 8089
+  esSearch: "| search index=notable"
+
+# -- Dashboard -------------------------------------------------------------
+
+dashboard:
+  host: "0.0.0.0"
+  port: 8080
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  route:
+    enabled: true
+    host: ""
+    tls:
+      termination: edge
+
+# -- Ingest (Universal HTTP Consumer) -------------------------------------
+
+ingest:
+  host: "0.0.0.0"
+  port: 8088
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  route:
+    enabled: true
+    host: ""
+    tls:
+      termination: edge
+
+# -- Router ----------------------------------------------------------------
+
+router:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+# -- Forwarder -------------------------------------------------------------
+
+forwarder:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# -- Optional consumers ----------------------------------------------------
+
+sqs:
+  enabled: false
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+kafkaConsumer:
+  enabled: false
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+pubsub:
+  enabled: false
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+splunkEs:
+  enabled: false
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# -- RabbitMQ subchart -----------------------------------------------------
+# Set rabbitmq.enabled=false and externalRabbitmq.url to use an existing instance.
+
+rabbitmq:
+  enabled: true
+  auth:
+    username: guest
+    password: guest
+  persistence:
+    enabled: true
+    size: 8Gi
+
+externalRabbitmq:
+  url: ""
+
+# -- Pod-level defaults ----------------------------------------------------
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

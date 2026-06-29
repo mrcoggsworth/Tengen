@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tengen.fullname" . }}-forwarder
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: forwarder
+spec:
+  replicas: {{ .Values.forwarder.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tengen.componentLabels" (dict "root" . "component" "forwarder") | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print .Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "tengen.componentLabels" (dict "root" . "component" "forwarder") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tengen.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: forwarder
+          image: {{ include "tengen.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "tengen.forwarder_main"]
+          env:
+            {{- include "tengen.commonEnv" . | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.forwarder.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

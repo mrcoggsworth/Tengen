@@ -1,0 +1,25 @@
+apiVersion: v2
+name: tengen
+description: >-
+  Agentic security harness: multi-cloud SOAR with LLM agents,
+  n8n workflow dispatch, durable queuing, and SIEM forwarding.
+type: application
+version: 0.1.0
+appVersion: "0.2.0"
+keywords:
+  - security
+  - soar
+  - n8n
+  - agents
+  - openshift
+maintainers:
+  - name: mrcoggsworth
+    url: https://github.com/mrcoggsworth
+sources:
+  - https://github.com/mrcoggsworth/Tengen
+
+dependencies:
+  - name: rabbitmq
+    version: "14.*"
+    repository: https://charts.bitnami.com/bitnami
+    condition: rabbitmq.enabled

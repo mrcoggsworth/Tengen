@@ -1,0 +1,23 @@
+{{- if .Values.ingest.route.enabled -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "tengen.fullname" . }}-ingest
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest
+spec:
+  {{- if .Values.ingest.route.host }}
+  host: {{ .Values.ingest.route.host }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "tengen.fullname" . }}-ingest
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.ingest.route.tls.termination }}
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+{{- end }}

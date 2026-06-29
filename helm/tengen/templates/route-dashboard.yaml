@@ -1,0 +1,23 @@
+{{- if .Values.dashboard.route.enabled -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "tengen.fullname" . }}-dashboard
+  labels:
+    {{- include "tengen.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+spec:
+  {{- if .Values.dashboard.route.host }}
+  host: {{ .Values.dashboard.route.host }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "tengen.fullname" . }}-dashboard
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.dashboard.route.tls.termination }}
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+{{- end }}

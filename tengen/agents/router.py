@@ -1,100 +1,134 @@
-"""RouterAgent — routes normalized incidents to the correct runbook agent."""
+"""RouterAgent — routes events to n8n workflows via webhook dispatch."""
 from __future__ import annotations
 
 import json
+import logging
 
 from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 
 from ..config import settings
-from .azure_runbook import azure_runbook_agent
-from .cloudtrail_runbook import cloudtrail_runbook_agent
-from .edr_runbook import edr_runbook_agent
-from .gcp_audit_runbook import gcp_audit_runbook_agent
-from .k8s_runbook import k8s_runbook_agent
+from ..n8n.client import N8nClient, N8nRequestFailed
+from ..n8n.route_resolver import NoRouteError, RouteResolver
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level singletons
+# ---------------------------------------------------------------------------
+# Client is safe to create eagerly (no file I/O in __init__).
+_n8n_client = N8nClient(
+    timeout=settings.n8n_timeout,
+    max_retries=settings.n8n_max_retries,
+    backoff_base=settings.n8n_backoff_base,
+)
+
+# Resolver is lazy: its __init__ opens the YAML file, which may not exist
+# until the env var is set (e.g. in tests via monkeypatch).
+_route_resolver: RouteResolver | None = None
 
 
-def _detect_source_type(event_json: str) -> str:
-    """Detect the log source type from a NormalizedEvent or raw Alert JSON.
+def _get_resolver() -> RouteResolver:
+    global _route_resolver
+    if _route_resolver is None:
+        _route_resolver = RouteResolver(settings.n8n_routes_path)
+    return _route_resolver
 
-    Returns: 'aws', 'gcp', 'azure', 'crowdstrike', 'k8s', 'openshift',
-             'firewall', 'ddos', or 'unknown'.
+
+# ---------------------------------------------------------------------------
+# ADK FunctionTool wrappers
+# ---------------------------------------------------------------------------
+
+def _resolve_route(vendor: str, category: str, event_type: str | None = None) -> str:
+    """Resolve a vendor/category/event_type to an n8n webhook URL.
+
+    Consults the n8n routing spec YAML (auto-reloads on file change).
+    Returns JSON: {"webhook_url": "...", "route_path": "...", "description": "..."}.
+    On no match: {"error": "no_route", "vendor": "...", "category": "..."}.
     """
     try:
-        from ..models.normalized_event import NormalizedEvent
-        event = NormalizedEvent.model_validate_json(event_json)
-        return event.source_type.value
-    except Exception:
-        pass
-    try:
-        data = json.loads(event_json)
-        source = data.get("source", data.get("source_type", ""))
-        if source:
-            return str(source)
-        from ..tools.normalizers.registry import detect_source_type
-        return detect_source_type(data).value
-    except Exception as exc:
-        return f"unknown (detection error: {exc})"
+        match = _get_resolver().resolve(vendor, category, event_type)
+        return json.dumps({
+            "webhook_url": match.webhook_url,
+            "route_path": match.route_path,
+            "description": match.description,
+        })
+    except NoRouteError as exc:
+        logger.error("No n8n route: %s", exc)
+        return json.dumps({
+            "error": "no_route",
+            "vendor": vendor,
+            "category": category,
+            "event_type": event_type,
+        })
 
 
-def _route_to_queue(source_type: str, incident_json: str) -> str:
-    """Use the RouteRegistry to determine which runbook queue this event belongs to.
+def _execute_webhook(webhook_url: str, payload_json: str) -> str:
+    """POST event payload to an n8n webhook and return the response.
 
-    Returns the queue name string.
+    Returns the raw n8n JSON response as a string.
+    On failure: {"error": "webhook_failed", "details": "...", "dlq": true}.
     """
     try:
-        from ..routing.registry import registry
-        from ..models.normalized_event import NormalizedEvent
-        event = NormalizedEvent.model_validate_json(incident_json)
-        # Route based on first event in incident or the event itself
-        queue = registry.match(event.raw_event)
-        return queue or "alerts.dlq"
-    except Exception:
-        pass
-    # Fall back to source_type mapping
-    mapping = {
-        "aws": "runbook.cloudtrail",
-        "gcp": "runbook.gcp.event_audit",
-        "azure": "runbook.azure.activity",
-        "crowdstrike": "runbook.crowdstrike",
-        "k8s": "runbook.k8s",
-        "openshift": "runbook.k8s",
-        "firewall": "runbook.firewall",
-        "ddos": "runbook.firewall",
-    }
-    return mapping.get(source_type, "alerts.dlq")
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError as exc:
+        return json.dumps({"error": "invalid_payload", "details": str(exc)})
 
+    try:
+        result = _n8n_client.execute_sync(webhook_url, payload)
+        return json.dumps(result)
+    except N8nRequestFailed as exc:
+        logger.error("n8n webhook failed: %s", exc)
+        return json.dumps({
+            "error": "webhook_failed",
+            "details": str(exc),
+            "url": exc.url,
+            "status": exc.status,
+            "attempts": exc.attempts,
+            "dlq": True,
+        })
+
+
+# Expose clean tool names (FunctionTool derives name from __name__).
+resolve_route = _resolve_route
+resolve_route.__name__ = "resolve_route"  # type: ignore[attr-defined]
+resolve_route.__qualname__ = "resolve_route"  # type: ignore[attr-defined]
+
+execute_webhook = _execute_webhook
+execute_webhook.__name__ = "execute_webhook"  # type: ignore[attr-defined]
+execute_webhook.__qualname__ = "execute_webhook"  # type: ignore[attr-defined]
 
 router_agent = LlmAgent(
     name="router_agent",
     model=settings.model_name,
     description=(
-        "Routes normalized security events to the correct cloud-provider or EDR runbook agent. "
-        "Handles AWS, GCP, Azure, CrowdStrike EDR, and Kubernetes."
+        "Routes security events to the correct n8n workflow via webhook. "
+        "Uses a hierarchical routing spec to match vendor/category/event_type "
+        "to webhook URLs."
     ),
     instruction=(
         "You are the RouterAgent. You receive a security event or incident as JSON. "
-        "1. Call detect_source_type to determine the log source. "
-        "2. Based on the source type, transfer to the correct runbook agent: "
-        "   - 'aws': transfer to cloudtrail_runbook_agent "
-        "   - 'gcp': transfer to gcp_audit_runbook_agent "
-        "   - 'azure': transfer to azure_runbook_agent "
-        "   - 'crowdstrike': transfer to edr_runbook_agent "
-        "   - 'k8s' or 'openshift': transfer to k8s_runbook_agent "
-        "   - 'firewall', 'ddos', or 'unknown': return JSON error: "
-        '     {"error": "no runbook agent for source_type", "source_type": "<value>"}. '
-        "Pass the original event JSON unchanged to the selected agent. "
-        "Return whatever the runbook agent produces."
+        "Your job is to dispatch it to the correct n8n workflow for processing.\n"
+        "\n"
+        "1. Analyze the event to identify:\n"
+        "   - vendor: the source platform (aws, crowdstrike, gcp, azure, k8s)\n"
+        "   - category: the log type or subsystem (cloudtrail, windows, audit, signin)\n"
+        "   - event_type: the specific event if identifiable (root_login, powershell_execution)\n"
+        "\n"
+        "2. Call resolve_route(vendor, category, event_type) to find the n8n webhook URL.\n"
+        "   If it returns an error, use the catch-all default or route to DLQ.\n"
+        "\n"
+        "3. Call execute_webhook(webhook_url, payload_json) with the resolved URL\n"
+        "   and the full event JSON as the payload.\n"
+        "\n"
+        "4. If the webhook succeeds, return the n8n response JSON.\n"
+        "   If it fails (dlq=true in response), return the error JSON so the\n"
+        "   orchestrator can route to the dead-letter queue.\n"
+        "\n"
+        "Do not modify the event payload. Pass it to n8n as-is."
     ),
     tools=[
-        FunctionTool(func=_detect_source_type),
-        FunctionTool(func=_route_to_queue),
-    ],
-    sub_agents=[
-        cloudtrail_runbook_agent,
-        gcp_audit_runbook_agent,
-        azure_runbook_agent,
-        edr_runbook_agent,
-        k8s_runbook_agent,
+        FunctionTool(func=resolve_route),
+        FunctionTool(func=execute_webhook),
     ],
 )
